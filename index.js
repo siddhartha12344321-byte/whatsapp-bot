@@ -1,92 +1,77 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
+const qrcode = require('qrcode-terminal'); // For logs
+const QRCodeImage = require('qrcode');     // NEW: For web browser
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const express = require('express');
 
-// --- 1. SETUP WEB SERVER (To keep the bot running 24/7) ---
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.get('/', (req, res) => {
-    res.send('Your WhatsApp Bot is Alive and Running! 🚀');
+// --- GLOBAL VAR TO STORE QR CODE ---
+let qrCodeData = ""; 
+
+// --- WEB SERVER ---
+app.get('/', (req, res) => { res.send('Bot is Alive! Go to <b>/qr</b> to scan.'); });
+
+// NEW ROUTE: Display QR as an Image
+app.get('/qr', async (req, res) => {
+    if (!qrCodeData) {
+        return res.send('<h2>⏳ QR Code generating... reload this page in 10 seconds.</h2>');
+    }
+    try {
+        // Convert the text QR into a scanable image
+        const url = await QRCodeImage.toDataURL(qrCodeData);
+        res.send(`
+            <div style="display:flex; justify-content:center; align-items:center; height:100vh;">
+                <div style="text-align:center;">
+                    <h1>Scan Me</h1>
+                    <img src="${url}" style="width:300px; border: 5px solid black;" />
+                    <p>Refresh if it expires.</p>
+                </div>
+            </div>
+        `);
+    } catch (err) {
+        res.send('Error generating QR');
+    }
 });
 
-app.listen(port, () => {
-    console.log(`Server is running on port ${port}`);
-});
+app.listen(port, () => { console.log(`Server running on port ${port}`); });
 
-// --- 2. CONFIGURATION ---
-// Get the API Key from the Environment Variable (Set this in Render Dashboard)
+// --- BOT LOGIC ---
 const API_KEY = process.env.GEMINI_API_KEY; 
-
-if (!API_KEY) {
-    console.error("❌ ERROR: GEMINI_API_KEY is missing! Set it in your Environment Variables.");
-    process.exit(1);
-}
-
 const genAI = new GoogleGenerativeAI(API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-// --- 3. WHATSAPP CLIENT SETUP ---
 const client = new Client({
-    authStrategy: new LocalAuth(), // Saves login session
+    authStrategy: new LocalAuth(),
     puppeteer: {
         headless: true,
-        // These arguments are ESSENTIAL for running on free cloud servers (Render/Replit)
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--disable-gpu'
-        ],
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
     }
 });
 
-// --- 4. EVENTS ---
-
-// Generate QR Code
 client.on('qr', (qr) => {
-    // This logs the QR code to the "Logs" tab in Render so you can scan it
-    console.log('⚡ SCAN THIS QR CODE NOW ⚡');
-    qrcode.generate(qr, { small: true });
+    console.log('QR RECEIVED (Check /qr route)');
+    qrCodeData = qr; // Save QR to variable for the website
+    qrcode.generate(qr, { small: true }); // Still print to logs just in case
 });
 
-// Login Successful
 client.on('ready', () => {
-    console.log('✅ Bot is successfully logged in and online!');
+    console.log('✅ Bot is Online!');
+    qrCodeData = ""; // Clear QR code after login
 });
 
-// Handle Messages
 client.on('message', async msg => {
     const chat = await msg.getChat();
-
-    // Only reply if it's a Group AND the bot is mentioned/tagged
     if (chat.isGroup && msg.body.includes("@")) {
         try {
-            // Remove the bot's tag from the message to get the pure prompt
             const prompt = msg.body.replace(/@\S+/g, "").trim();
-            
-            if (!prompt) return; // Ignore empty messages
-
-            // Show "Typing..." state
+            if (!prompt) return;
             await chat.sendStateTyping();
-
-            // Ask Gemini AI
             const result = await model.generateContent(prompt);
-            const response = result.response.text();
-
-            // Reply to user
-            await msg.reply(response);
-
-        } catch (error) {
-            console.error("Error generating response:", error);
-            // Optional: await msg.reply("My brain is taking a nap. Try again later!");
-        }
+            await msg.reply(result.response.text());
+        } catch (error) { console.error(error); }
     }
 });
 
-// Start the Client
 client.initialize();
