@@ -4,7 +4,7 @@ const QRCodeImage = require('qrcode');
 const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generative-ai");
 const express = require('express');
 
-// --- WEB SERVER (For UptimeRobot & Scanning) ---
+// --- WEB SERVER ---
 const app = express();
 const port = process.env.PORT || 3000;
 let qrCodeData = ""; 
@@ -20,18 +20,24 @@ app.get('/qr', async (req, res) => {
 });
 app.listen(port, () => console.log(`Server running on port ${port}`));
 
-// --- AI SETUP (Updated for YOUR Models) ---
+// --- AI SETUP ---
 const API_KEY = process.env.GEMINI_API_KEY;
 const genAI = new GoogleGenerativeAI(API_KEY);
 
-// ✅ UPDATED LIST: Uses the models YOU actually own
-const MODELS_TO_TRY = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.0-flash-exp"];
+// ✅ NEW LIST: Mix of 'Flash', 'Lite' and '2.5' to avoid hitting one single limit
+const MODELS_TO_TRY = [
+    "gemini-2.0-flash", 
+    "gemini-2.5-flash",           // Backup 1 (Newer)
+    "gemini-2.0-flash-lite-preview-02-05", // Backup 2 (Lightweight)
+    "gemini-flash-latest"         // Backup 3 (Standard)
+];
 let currentModelIndex = 0;
 
 function getModel() {
-    console.log(`🧠 Using Brain: ${MODELS_TO_TRY[currentModelIndex]}`);
+    const modelName = MODELS_TO_TRY[currentModelIndex];
+    console.log(`🧠 Switching Brain to: ${modelName}`);
     return genAI.getGenerativeModel({ 
-        model: MODELS_TO_TRY[currentModelIndex],
+        model: modelName,
         safetySettings: [
             { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
             { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
@@ -51,7 +57,7 @@ const client = new Client({
 });
 
 client.on('qr', (qr) => {
-    console.log('⚡ NEW QR CODE RECEIVED! Check /qr link.');
+    console.log('⚡ QR RECEIVED! Check /qr link.');
     qrCodeData = qr;
     qrcode.generate(qr, { small: true });
 });
@@ -64,7 +70,6 @@ client.on('ready', () => {
 client.on('message', async msg => {
     const chat = await msg.getChat();
     
-    // Reply to Groups with @Tag OR Private Messages (if you want)
     if (chat.isGroup && msg.body.includes("@")) {
         try {
             const prompt = msg.body.replace(/@\S+/g, "").trim();
@@ -73,24 +78,26 @@ client.on('message', async msg => {
             await chat.sendStateTyping();
 
             try {
-                // Try 1: Use the primary model
                 const model = getModel();
                 const result = await model.generateContent(prompt);
                 await msg.reply(result.response.text());
                 
             } catch (aiError) {
-                console.error(`❌ Model ${MODELS_TO_TRY[currentModelIndex]} failed:`, aiError.message);
+                console.error(`❌ Model ${MODELS_TO_TRY[currentModelIndex]} crashed:`, aiError.message);
                 
-                // Auto-Switch Logic
-                if (aiError.message.includes("404") || aiError.message.includes("not found")) {
-                    currentModelIndex++;
+                // 🛑 CRITICAL FIX: Catch "429 Too Many Requests" OR "404 Not Found"
+                if (aiError.message.includes("429") || aiError.message.includes("404") || aiError.message.includes("not found") || aiError.message.includes("quota")) {
+                    
+                    currentModelIndex++; // Move to next brain
+                    
                     if (currentModelIndex < MODELS_TO_TRY.length) {
-                        console.log(`⚠️ Switching to backup: ${MODELS_TO_TRY[currentModelIndex]}`);
+                        console.log(`⚠️ Quota Hit! Trying Backup: ${MODELS_TO_TRY[currentModelIndex]}`);
                         const backupModel = getModel();
                         const retryResult = await backupModel.generateContent(prompt);
                         await msg.reply(retryResult.response.text());
                     } else {
-                        await msg.reply("I tried all my brains, but they are offline. 😵");
+                        // If ALL failed, reset index and tell user to wait
+                        await msg.reply("I am thinking too fast! Give me 1 minute to cool down. 🥵");
                         currentModelIndex = 0; 
                     }
                 }
