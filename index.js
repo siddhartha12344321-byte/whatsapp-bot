@@ -39,27 +39,33 @@ function rotateKey() {
     genAI = new GoogleGenerativeAI(rawKeys[currentKeyIndex]);
 }
 
-// --- 3. MODEL CONFIGURATION (UPSC TUTOR MODE) ---
+// --- 3. MODEL CONFIGURATION (IDENTITY + UPSC MODE) ---
 const MODEL_NAME = "gemini-2.0-flash";
 
-// 🔥 THIS IS THE BRAIN UPGRADE 🔥
 const SYSTEM_INSTRUCTION = `
-You are an expert UPSC (Union Public Service Commission) Exam Tutor. 
-Your Target Audience: Serious aspirants preparing for the Civil Services Exam.
-Your Goal: Provide the most concise, high-yield, and accurate solution possible.
+You are **Siddhartha's AI Assistant**, Created By **Siddhartha Vardhan Singh**.
+Target Audience: UPSC (Civil Services) Aspirants.
 
-Guidelines:
-1. Direct Answer: State the correct option/answer clearly first.
-2. The "Why": Provide a 2-3 sentence explanation focusing on the specific Article, Amendment, History Date, or Economic concept.
-3. Elimination: Briefly mention why the confusing distractors are wrong (if applicable).
-4. Tone: Professional, strict, and to-the-point. No "Hello" or "Hope this helps".
-5. For Polls: Analyze the question and options carefully.
+MANDATORY RULES:
+1. **IDENTITY CHECK:** If anyone asks "Who are you?", "Your name?", "Who created you?", or "About yourself", you MUST reply EXACTLY:
+   "I am Siddhartha's AI Assistant, Created By Siddhartha Vardhan Singh."
+
+2. **ANSWER STYLE:** Keep it EXTREMELY SHORT, CRISPY, & RELEVANT.
+   - Max 3-5 lines. No fluff. No long paragraphs.
+
+3. **POLLS/MCQs (ELIMINATION METHOD):**
+   - ✅ **Answer:** State the correct option clearly.
+   - ❌ **Eliminate:** Briefly explain why the wrong options are incorrect.
+   - 🧠 **Key Fact:** One simple "Gold Nugget" to memorize.
+
+4. **CASUAL CHAT:**
+   - Keep it polite but very brief (e.g., "Hello! Ready to study?").
 `;
 
 function getModel() {
     return genAI.getGenerativeModel({ 
         model: MODEL_NAME,
-        systemInstruction: SYSTEM_INSTRUCTION, // <-- Added Persona Here
+        systemInstruction: SYSTEM_INSTRUCTION,
         safetySettings: [
             { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
             { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
@@ -84,7 +90,7 @@ client.on('qr', (qr) => {
 });
 
 client.on('ready', () => {
-    console.log('✅ UPSC Bot is Online!');
+    console.log('✅ Siddhartha\'s AI Bot is Online!');
     qrCodeData = "";
 });
 
@@ -108,6 +114,8 @@ client.on('message', async msg => {
                 }
             } else if (msg.hasQuotedMsg) {
                 const quotedMsg = await msg.getQuotedMessage();
+                
+                // 1. Quoted Image Handling
                 if (quotedMsg.hasMedia) {
                     const media = await quotedMsg.downloadMedia();
                     if (media && media.mimetype.startsWith('image/')) {
@@ -115,12 +123,17 @@ client.on('message', async msg => {
                     }
                 }
                 
-                // B. CHECK FOR POLLS (Handle Poll Replies)
+                // 2. Poll Handling (CRASH PROOF + ELIMINATION)
                 if (quotedMsg.type === 'poll_creation') {
-                    const pollQuestion = quotedMsg.pollName;
-                    const pollOptions = quotedMsg.pollOptions.map(opt => opt.name).join(", ");
+                    const pollQuestion = quotedMsg.pollName || quotedMsg.body || "Question";
+                    let pollOptions = "Options not readable (technical limitation). Answer based on question.";
+
+                    // FIX: Strict check to ensure 'pollOptions' exists before mapping
+                    if (quotedMsg.pollOptions && Array.isArray(quotedMsg.pollOptions)) {
+                        pollOptions = quotedMsg.pollOptions.map(opt => opt.name).join(", ");
+                    }
                     
-                    prompt = `[UPSC POLL QUESTION]\nQuestion: "${pollQuestion}"\nOptions: ${pollOptions}\n\nTask: Identify the correct option and explain the core concept concisely for an aspirant.`;
+                    prompt = `[UPSC POLL/MCQ]\nQuestion: "${pollQuestion}"\nOptions: ${pollOptions}\n\nTask: Solve using Elimination. Keep it short.`;
                 }
             }
 
@@ -150,7 +163,7 @@ client.on('message', async msg => {
             }
 
         } catch (err) {
-            console.error("Error:", err);
+            console.error("Critical Bot Error:", err);
         }
     }
 });
