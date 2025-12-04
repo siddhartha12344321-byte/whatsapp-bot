@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-gemini-bot",
   "version": "2.0.0",
-  "description": "WhatsApp Bot with UPDATED Gemini Library",
+  "description": "WhatsApp Bot with UPDATED Library",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -9,9 +9,7 @@
   "keywords": [
     "whatsapp",
     "bot",
-    "ai",
-    "gemini",
-    "render"
+    "ai"
   ],
   "author": "Me",
   "license": "ISC",
