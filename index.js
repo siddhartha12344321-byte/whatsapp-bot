@@ -1,122 +1,101 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal'); // For logs (backup)
-const QRCodeImage = require('qrcode');     // For web browser (primary)
+const qrcode = require('qrcode-terminal'); 
+const QRCodeImage = require('qrcode');
 const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generative-ai");
 const express = require('express');
 
-// --- 1. SETUP WEB SERVER (For UptimeRobot & QR Display) ---
+// --- WEB SERVER (For UptimeRobot & Scanning) ---
 const app = express();
 const port = process.env.PORT || 3000;
-
-// Global variable to store the QR code text
 let qrCodeData = ""; 
 
-app.get('/', (req, res) => {
-    res.send('<h1>Bot is Active 🤖</h1><p>Go to <a href="/qr">/qr</a> to scan your code.</p>');
-});
-
+app.get('/', (req, res) => res.send('Bot is Alive! <a href="/qr">Scan QR</a>'));
 app.get('/qr', async (req, res) => {
-    if (!qrCodeData) {
-        return res.send('<h2>⏳ Bot is connected (or regenerating)... Reload in 10s.</h2>');
-    }
-    try {
-        // Convert text QR to an Image URL
-        const url = await QRCodeImage.toDataURL(qrCodeData);
-        res.send(`
-            <div style="display:flex; flex-direction:column; justify-content:center; align-items:center; height:100vh; font-family:sans-serif;">
-                <h1>📱 Scan Me</h1>
-                <img src="${url}" style="width:300px; border: 5px solid #333; border-radius:10px;" />
-                <p>Open WhatsApp > Linked Devices > Link a Device</p>
-                <p><i>Refreshes automatically when code changes.</i></p>
-            </div>
-        `);
-    } catch (err) {
-        res.send('Error generating QR Image.');
-    }
+    if (!qrCodeData) return res.send('<h2>⏳ Generating QR... Reload in 10s.</h2>');
+    const url = await QRCodeImage.toDataURL(qrCodeData);
+    res.send(`<div style="display:flex;justify-content:center;align-items:center;height:100vh;">
+              <img src="${url}" style="border:5px solid black;width:300px;"></div>`);
 });
+app.listen(port, () => console.log(`Server running on port ${port}`));
 
-app.listen(port, () => {
-    console.log(`Server running on port ${port}`);
-});
-
-// --- 2. CONFIGURATION & AI BRAIN ---
-const API_KEY = process.env.GEMINI_API_KEY; 
-
-if (!API_KEY) {
-    console.error("❌ CRITICAL ERROR: GEMINI_API_KEY is missing in Render Environment Variables!");
-    process.exit(1);
-}
-
+// --- AI SETUP (Self-Healing) ---
+const API_KEY = process.env.GEMINI_API_KEY;
 const genAI = new GoogleGenerativeAI(API_KEY);
 
-// SAFETY SETTINGS: Turn OFF filters so it doesn't get stuck "Typing..."
-const model = genAI.getGenerativeModel({ 
-    model: "gemini-1.5-flash",
-    safetySettings: [
-        { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
-        { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
-        { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
-        { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE }
-    ]
-});
+// List of models to try if one fails
+const MODELS_TO_TRY = ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-pro"];
+let currentModelIndex = 0;
 
-// --- 3. WHATSAPP CLIENT SETUP ---
+function getModel() {
+    return genAI.getGenerativeModel({ 
+        model: MODELS_TO_TRY[currentModelIndex],
+        safetySettings: [
+            { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+            { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+            { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+            { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE }
+        ]
+    });
+}
+
+// --- WHATSAPP CLIENT ---
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
         headless: true,
-        // Critical args for Render/Cloud hosting
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-gpu',
-            '--no-first-run'
-        ]
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--no-first-run']
     }
 });
 
-// --- 4. EVENTS ---
-
 client.on('qr', (qr) => {
-    console.log('⚡ NEW QR RECEIVED. Check the /qr link!');
-    qrCodeData = qr; // Update the variable for the website
-    qrcode.generate(qr, { small: true }); // Print to logs as backup
+    console.log('⚡ NEW QR CODE RECEIVED! Check /qr link.');
+    qrCodeData = qr;
+    qrcode.generate(qr, { small: true });
 });
 
 client.on('ready', () => {
-    console.log('✅ Bot is successfully logged in and online!');
-    qrCodeData = ""; // Clear QR so website doesn't show old code
+    console.log('✅ Bot is Online!');
+    qrCodeData = ""; 
 });
 
 client.on('message', async msg => {
     const chat = await msg.getChat();
-
-    // LOGIC: Only reply if it's a Group AND the bot is Tagged (@)
+    
+    // Only reply to Groups with @Tag
     if (chat.isGroup && msg.body.includes("@")) {
         try {
-            // Remove the "@BotName" part from the message
             const prompt = msg.body.replace(/@\S+/g, "").trim();
-            
-            if (!prompt) return; // Don't reply to empty messages
+            if (!prompt) return;
 
-            // Show "Typing..."
             await chat.sendStateTyping();
 
-            // Ask Gemini
-            const result = await model.generateContent(prompt);
-            const response = result.response.text();
-
-            // Reply
-            await msg.reply(response);
-
+            // Try to generate content
+            try {
+                const model = getModel();
+                const result = await model.generateContent(prompt);
+                await msg.reply(result.response.text());
+                
+            } catch (aiError) {
+                console.error(`❌ Model ${MODELS_TO_TRY[currentModelIndex]} failed:`, aiError.message);
+                
+                // If 404 error, try the next model automatically
+                if (aiError.message.includes("404") || aiError.message.includes("not found")) {
+                    currentModelIndex++;
+                    if (currentModelIndex < MODELS_TO_TRY.length) {
+                        console.log(`⚠️ Switching to backup model: ${MODELS_TO_TRY[currentModelIndex]}`);
+                        const backupModel = getModel();
+                        const retryResult = await backupModel.generateContent(prompt);
+                        await msg.reply(retryResult.response.text());
+                    } else {
+                        await msg.reply("I tried all my brains, but Google is sleeping. Try again later! 😵");
+                        currentModelIndex = 0; // Reset
+                    }
+                }
+            }
         } catch (error) {
-            console.error("❌ AI Error:", error);
-            // If it crashes, tell the group (optional)
-            // await msg.reply("My brain froze! 🥶 Check logs.");
+            console.error("General Error:", error);
         }
     }
 });
 
-// Start the bot
 client.initialize();
