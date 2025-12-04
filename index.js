@@ -1,49 +1,104 @@
+const { Client, LocalAuth } = require('whatsapp-web.js');
+const qrcode = require('qrcode-terminal'); 
+const QRCodeImage = require('qrcode');
+const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generative-ai");
 const express = require('express');
+
+// --- WEB SERVER (For UptimeRobot & Scanning) ---
 const app = express();
 const port = process.env.PORT || 3000;
+let qrCodeData = ""; 
 
-// Web Server to keep Render happy
-app.get('/', (req, res) => res.send('<h1>🕵️‍♂️ Detective Mode Running... Check Logs!</h1>'));
+app.get('/', (req, res) => res.send('Bot is Alive! <a href="/qr">Scan QR</a>'));
+app.get('/qr', async (req, res) => {
+    if (!qrCodeData) return res.send('<h2>⏳ Generating QR... Reload in 10s.</h2>');
+    try {
+        const url = await QRCodeImage.toDataURL(qrCodeData);
+        res.send(`<div style="display:flex;justify-content:center;align-items:center;height:100vh;">
+                  <img src="${url}" style="border:5px solid black;width:300px;"></div>`);
+    } catch { res.send('Error generating QR'); }
+});
 app.listen(port, () => console.log(`Server running on port ${port}`));
 
-// --- THE DETECTIVE TOOL ---
-// This uses raw "fetch" to bypass the library completely
+// --- AI SETUP (Updated for YOUR Models) ---
 const API_KEY = process.env.GEMINI_API_KEY;
+const genAI = new GoogleGenerativeAI(API_KEY);
 
-async function findMyModel() {
-    console.log("\n\n==================================================");
-    console.log("🕵️‍♂️ ASKING GOOGLE FOR YOUR MODEL NAMES...");
-    console.log("==================================================\n");
+// ✅ UPDATED LIST: Uses the models YOU actually own
+const MODELS_TO_TRY = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.0-flash-exp"];
+let currentModelIndex = 0;
 
-    try {
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${API_KEY}`);
-        const data = await response.json();
-
-        if (data.error) {
-            console.error("❌ GOOGLE REFUSED:", JSON.stringify(data.error, null, 2));
-        } else if (data.models) {
-            console.log("✅ SUCCESS! HERE IS THE LIST OF MODELS YOU OWN:");
-            console.log("------------------------------------------------");
-            
-            // Filter only models that can "generateContent" (Chat)
-            const chatModels = data.models.filter(m => m.supportedGenerationMethods.includes("generateContent"));
-            
-            chatModels.forEach(m => {
-                // We strip 'models/' from the name to make it easy to copy
-                console.log(`👉 ${m.name.replace("models/", "")}`);
-            });
-            
-            console.log("------------------------------------------------");
-            console.log("📝 INSTRUCTION: Copy ONE name from above (e.g. gemini-1.5-flash-001) and save it!");
-            console.log("==================================================\n\n");
-        } else {
-            console.log("⚠️ EMPTY RESPONSE:", data);
-        }
-
-    } catch (error) {
-        console.error("❌ CONNECTION ERROR:", error.message);
-    }
+function getModel() {
+    console.log(`🧠 Using Brain: ${MODELS_TO_TRY[currentModelIndex]}`);
+    return genAI.getGenerativeModel({ 
+        model: MODELS_TO_TRY[currentModelIndex],
+        safetySettings: [
+            { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+            { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+            { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+            { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE }
+        ]
+    });
 }
 
-// Run the detective immediately
-findMyModel();
+// --- WHATSAPP CLIENT ---
+const client = new Client({
+    authStrategy: new LocalAuth(),
+    puppeteer: {
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--no-first-run']
+    }
+});
+
+client.on('qr', (qr) => {
+    console.log('⚡ NEW QR CODE RECEIVED! Check /qr link.');
+    qrCodeData = qr;
+    qrcode.generate(qr, { small: true });
+});
+
+client.on('ready', () => {
+    console.log('✅ Bot is Online!');
+    qrCodeData = ""; 
+});
+
+client.on('message', async msg => {
+    const chat = await msg.getChat();
+    
+    // Reply to Groups with @Tag OR Private Messages (if you want)
+    if (chat.isGroup && msg.body.includes("@")) {
+        try {
+            const prompt = msg.body.replace(/@\S+/g, "").trim();
+            if (!prompt) return;
+
+            await chat.sendStateTyping();
+
+            try {
+                // Try 1: Use the primary model
+                const model = getModel();
+                const result = await model.generateContent(prompt);
+                await msg.reply(result.response.text());
+                
+            } catch (aiError) {
+                console.error(`❌ Model ${MODELS_TO_TRY[currentModelIndex]} failed:`, aiError.message);
+                
+                // Auto-Switch Logic
+                if (aiError.message.includes("404") || aiError.message.includes("not found")) {
+                    currentModelIndex++;
+                    if (currentModelIndex < MODELS_TO_TRY.length) {
+                        console.log(`⚠️ Switching to backup: ${MODELS_TO_TRY[currentModelIndex]}`);
+                        const backupModel = getModel();
+                        const retryResult = await backupModel.generateContent(prompt);
+                        await msg.reply(retryResult.response.text());
+                    } else {
+                        await msg.reply("I tried all my brains, but they are offline. 😵");
+                        currentModelIndex = 0; 
+                    }
+                }
+            }
+        } catch (error) {
+            console.error("General Error:", error);
+        }
+    }
+});
+
+client.initialize();
