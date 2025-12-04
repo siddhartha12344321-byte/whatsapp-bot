@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-gemini-bot",
   "version": "1.0.0",
-  "description": "24/7 WhatsApp AI Bot using Gemini",
+  "description": "WhatsApp Bot with Gemini AI and Web QR Code",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -10,13 +10,15 @@
     "whatsapp",
     "bot",
     "ai",
-    "gemini"
+    "gemini",
+    "render"
   ],
   "author": "Me",
   "license": "ISC",
   "dependencies": {
     "whatsapp-web.js": "^1.23.0",
     "qrcode-terminal": "^0.12.0",
+    "qrcode": "^1.5.3",
     "@google/generative-ai": "^0.2.1",
     "express": "^4.18.2"
   },
