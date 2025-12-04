@@ -4,7 +4,7 @@ const QRCodeImage = require('qrcode');
 const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generative-ai");
 const express = require('express');
 
-// --- 1. WEB SERVER ---
+// --- 1. WEB SERVER (For 24/7 Uptime) ---
 const app = express();
 const port = process.env.PORT || 3000;
 let qrCodeData = "";
@@ -39,27 +39,42 @@ function rotateKey() {
     genAI = new GoogleGenerativeAI(rawKeys[currentKeyIndex]);
 }
 
-// --- 3. MODEL CONFIGURATION (IDENTITY + UPSC MODE) ---
+// --- 3. THE BRAIN (Attractive Formatting Update) ---
 const MODEL_NAME = "gemini-2.0-flash";
 
 const SYSTEM_INSTRUCTION = `
 You are **Siddhartha's AI Assistant**, Created By **Siddhartha Vardhan Singh**.
-Target Audience: UPSC (Civil Services) Aspirants.
 
-MANDATORY RULES:
-1. **IDENTITY CHECK:** If anyone asks "Who are you?", "Your name?", "Who created you?", or "About yourself", you MUST reply EXACTLY:
-   "I am Siddhartha's AI Assistant, Created By Siddhartha Vardhan Singh."
+**BEHAVIOR PROTOCOL:**
 
-2. **ANSWER STYLE:** Keep it EXTREMELY SHORT, CRISPY, & RELEVANT.
-   - Max 3-5 lines. No fluff. No long paragraphs.
+1. **IDENTITY RULE (HIGHEST PRIORITY):** - IF asked "Who are you?", "Who made you?":
+   - REPLY EXACTLY: "I am Siddhartha's AI Assistant, Created By Siddhartha Vardhan Singh."
 
-3. **POLLS/MCQs (ELIMINATION METHOD):**
-   - ✅ **Answer:** State the correct option clearly.
-   - ❌ **Eliminate:** Briefly explain why the wrong options are incorrect.
-   - 🧠 **Key Fact:** One simple "Gold Nugget" to memorize.
+2. **STUDY MODE (Attractive Formatting):**
+   - TRIGGER: User asks a Question or Replies to a Study Context (Text/Poll/Image).
+   - **FORMATTING RULES:**
+     - Use *BOLD* for headers.
+     - Use Bullet Points (•) for lists.
+     - Use Blockquotes (>) for the final Key Fact.
+     - Keep it CRISP (No long paragraphs).
 
-4. **CASUAL CHAT:**
-   - Keep it polite but very brief (e.g., "Hello! Ready to study?").
+   - **OUTPUT TEMPLATE (Follow this Strictly):**
+     
+     *✅ ANSWER:* [Option/Direct Answer]
+     
+     *📚 EXPLANATION:*
+     • [Point 1: Main Concept]
+     • [Point 2: Relevant Article/Date/Data]
+
+     *❌ WHY OTHERS ARE WRONG:* (Only for MCQs/Polls)
+     • [Eliminate Option A]
+     • [Eliminate Option B]
+
+     > *💡 KEY FACT:* [One high-yield gold nugget to memorize]
+
+3. **CASUAL MODE:**
+   - TRIGGER: "Hi", "Hello", "How are you?".
+   - STYLE: Brief, friendly, normal text. No complex formatting.
 `;
 
 function getModel() {
@@ -90,7 +105,7 @@ client.on('qr', (qr) => {
 });
 
 client.on('ready', () => {
-    console.log('✅ Siddhartha\'s AI Bot is Online!');
+    console.log('✅ Siddhartha\'s AI is Online!');
     qrCodeData = "";
 });
 
@@ -103,40 +118,46 @@ client.on('message', async msg => {
         try {
             await chat.sendStateTyping();
 
+            // 1. Clean the user's prompt (remove the @Tag)
             let prompt = msg.body.replace(/@\S+/g, "").trim();
             let imagePart = null;
 
-            // A. CHECK FOR IMAGES (Direct or Quoted)
-            if (msg.hasMedia) {
-                const media = await msg.downloadMedia();
-                if (media && media.mimetype.startsWith('image/')) {
-                    imagePart = { inlineData: { data: media.data, mimeType: media.mimetype } };
-                }
-            } else if (msg.hasQuotedMsg) {
+            // --- UNIVERSAL CONTEXT READER ---
+            if (msg.hasQuotedMsg) {
                 const quotedMsg = await msg.getQuotedMessage();
-                
-                // 1. Quoted Image Handling
+
+                // A. QUOTED IMAGE
                 if (quotedMsg.hasMedia) {
                     const media = await quotedMsg.downloadMedia();
                     if (media && media.mimetype.startsWith('image/')) {
                         imagePart = { inlineData: { data: media.data, mimeType: media.mimetype } };
                     }
                 }
-                
-                // 2. Poll Handling (CRASH PROOF + ELIMINATION)
+
+                // B. QUOTED POLL
                 if (quotedMsg.type === 'poll_creation') {
                     const pollQuestion = quotedMsg.pollName || quotedMsg.body || "Question";
-                    let pollOptions = "Options not readable (technical limitation). Answer based on question.";
-
-                    // FIX: Strict check to ensure 'pollOptions' exists before mapping
+                    let pollOptions = "Options not readable.";
                     if (quotedMsg.pollOptions && Array.isArray(quotedMsg.pollOptions)) {
                         pollOptions = quotedMsg.pollOptions.map(opt => opt.name).join(", ");
                     }
-                    
-                    prompt = `[UPSC POLL/MCQ]\nQuestion: "${pollQuestion}"\nOptions: ${pollOptions}\n\nTask: Solve using Elimination. Keep it short.`;
+                    prompt = `[CONTEXT: User is replying to this POLL]\nQuestion: "${pollQuestion}"\nOptions: ${pollOptions}\n\nUser asked: ${prompt || "Solve this"}`;
+                }
+
+                // C. QUOTED TEXT
+                else if (quotedMsg.body) {
+                    prompt = `[CONTEXT: User is replying to this TEXT]\n"${quotedMsg.body}"\n\nUser asked: ${prompt || "Analyze this"}`;
+                }
+            } 
+            // --- DIRECT IMAGE HANDLING ---
+            else if (msg.hasMedia) {
+                const media = await msg.downloadMedia();
+                if (media && media.mimetype.startsWith('image/')) {
+                    imagePart = { inlineData: { data: media.data, mimeType: media.mimetype } };
                 }
             }
 
+            // Safety check
             if (!prompt && !imagePart) return; 
 
             // RETRY LOOP
@@ -163,7 +184,7 @@ client.on('message', async msg => {
             }
 
         } catch (err) {
-            console.error("Critical Bot Error:", err);
+            console.error("Bot Error:", err);
         }
     }
 });
