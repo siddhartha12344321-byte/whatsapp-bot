@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-gemini-bot",
-  "version": "3.5.0",
-  "description": "WhatsApp Bot with Auto-Healing AI",
+  "version": "4.0.0",
+  "description": "WhatsApp Bot with Dual-Key Rotation and Gemini 2.0",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
