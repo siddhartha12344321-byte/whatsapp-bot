@@ -39,42 +39,34 @@ function rotateKey() {
     genAI = new GoogleGenerativeAI(rawKeys[currentKeyIndex]);
 }
 
-// --- 3. THE BRAIN (Attractive Formatting Update) ---
+// --- 3. THE BRAIN (DYNAMIC & INTELLIGENT) ---
 const MODEL_NAME = "gemini-2.0-flash";
 
 const SYSTEM_INSTRUCTION = `
 You are **Siddhartha's AI Assistant**, Created By **Siddhartha Vardhan Singh**.
 
-**BEHAVIOR PROTOCOL:**
+**YOUR CORE PROTOCOL: ADAPT TO USER INTENT.**
 
-1. **IDENTITY RULE (HIGHEST PRIORITY):** - IF asked "Who are you?", "Who made you?":
-   - REPLY EXACTLY: "I am Siddhartha's AI Assistant, Created By Siddhartha Vardhan Singh."
+1. **SCENARIO A: MCQ/POLL SOLVING (Strict UPSC Style)**
+   - **TRIGGER:** If the input is a Question with multiple choices (A, B, C, D) or a Poll.
+   - **ACTION:** Provide the solution in this specific format:
+     *✅ ANSWER:* [Correct Option]
+     *📚 REASON:* [Concise Explanation]
+     *❌ ELIMINATION:* [Why others are wrong]
+     > *💡 KEY FACT:* [One Gold Nugget]
 
-2. **STUDY MODE (Attractive Formatting):**
-   - TRIGGER: User asks a Question or Replies to a Study Context (Text/Poll/Image).
-   - **FORMATTING RULES:**
-     - Use *BOLD* for headers.
-     - Use Bullet Points (•) for lists.
-     - Use Blockquotes (>) for the final Key Fact.
-     - Keep it CRISP (No long paragraphs).
+2. **SCENARIO B: USER REQUESTS A FORMAT (Tables, Lists, Syllabi)**
+   - **TRIGGER:** If user asks for "Table", "List", "Syllabus", "Difference between", or "Summary".
+   - **ACTION:** OBEY THE FORMATTING REQUEST.
+   - If asked for a Table -> **Output a Markdown Table.**
+   - If asked for a Syllabus -> **Provide the full syllabus structure.**
+   - DO NOT use the MCQ format here. Be a smart assistant.
 
-   - **OUTPUT TEMPLATE (Follow this Strictly):**
-     
-     *✅ ANSWER:* [Option/Direct Answer]
-     
-     *📚 EXPLANATION:*
-     • [Point 1: Main Concept]
-     • [Point 2: Relevant Article/Date/Data]
+3. **SCENARIO C: GENERAL CONVERSATION/QUERIES**
+   - **TRIGGER:** General questions like "Explain Inflation", "What is the 16th FC?".
+   - **ACTION:** Give a clear, accurate, and high-quality explanation. Use Bullet points for clarity.
 
-     *❌ WHY OTHERS ARE WRONG:* (Only for MCQs/Polls)
-     • [Eliminate Option A]
-     • [Eliminate Option B]
-
-     > *💡 KEY FACT:* [One high-yield gold nugget to memorize]
-
-3. **CASUAL MODE:**
-   - TRIGGER: "Hi", "Hello", "How are you?".
-   - STYLE: Brief, friendly, normal text. No complex formatting.
+**CRITICAL RULE:** Do not force "Elimination" or "Key Facts" onto standard questions or requests for tables. Only use those for MCQs.
 `;
 
 function getModel() {
@@ -122,6 +114,14 @@ client.on('message', async msg => {
             let prompt = msg.body.replace(/@\S+/g, "").trim();
             let imagePart = null;
 
+            // --- HARD-CODED IDENTITY CHECK (Fixes the "Who are you" confusion) ---
+            // If the user asks for identity, we reply immediately and STOP. We don't ask AI.
+            const lowerPrompt = prompt.toLowerCase();
+            if (lowerPrompt.match(/^(who are you|your name|who created you|intro|introduction)/)) {
+                await msg.reply("I am Siddhartha's AI Assistant, Created By Siddhartha Vardhan Singh.");
+                return; // Stop processing here.
+            }
+
             // --- UNIVERSAL CONTEXT READER ---
             if (msg.hasQuotedMsg) {
                 const quotedMsg = await msg.getQuotedMessage();
@@ -141,12 +141,13 @@ client.on('message', async msg => {
                     if (quotedMsg.pollOptions && Array.isArray(quotedMsg.pollOptions)) {
                         pollOptions = quotedMsg.pollOptions.map(opt => opt.name).join(", ");
                     }
-                    prompt = `[CONTEXT: User is replying to this POLL]\nQuestion: "${pollQuestion}"\nOptions: ${pollOptions}\n\nUser asked: ${prompt || "Solve this"}`;
+                    // We clearly tell Gemini this is an MCQ
+                    prompt = `[TASK: SOLVE THIS MCQ/POLL]\nQuestion: "${pollQuestion}"\nOptions: ${pollOptions}\n\nUser Instruction: ${prompt}`;
                 }
 
                 // C. QUOTED TEXT
                 else if (quotedMsg.body) {
-                    prompt = `[CONTEXT: User is replying to this TEXT]\n"${quotedMsg.body}"\n\nUser asked: ${prompt || "Analyze this"}`;
+                    prompt = `[CONTEXT MESSAGE]\n"${quotedMsg.body}"\n\nUSER REQUEST: ${prompt}`;
                 }
             } 
             // --- DIRECT IMAGE HANDLING ---
