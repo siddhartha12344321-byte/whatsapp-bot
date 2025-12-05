@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-gemini-bot",
-  "version": "4.0.0",
-  "description": "WhatsApp Bot with Dual-Key Rotation and Gemini 2.0",
+  "version": "5.0.0",
+  "description": "WhatsApp Bot with Express Server and Gemini",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
