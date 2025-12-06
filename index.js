@@ -3,8 +3,8 @@ const qrcode = require('qrcode-terminal');
 const QRCodeImage = require('qrcode');
 const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generative-ai");
 const express = require('express');
-const fs = require('fs'); // For free file-based persistence
-const sanitizeHtml = require('sanitize-html'); // Free package for input sanitization
+const fs = require('fs');
+const sanitizeHtml = require('sanitize-html');
 
 // --- 1. WEB SERVER ---
 const app = express();
@@ -21,9 +21,10 @@ app.get('/qr', async (req, res) => {
 });
 app.listen(port, () => console.log(`Server running on port ${port}`));
 
-// --- 2. FREE PERSISTENCE (JSON FILE) ---
+// --- 2. PERSISTENCE (JSON FILE) ---
 const HISTORY_FILE = 'chatHistory.json';
 let chatHistory = new Map();
+
 function loadHistory() {
     if (fs.existsSync(HISTORY_FILE)) {
         try {
@@ -38,7 +39,7 @@ function saveHistory() {
         fs.writeFileSync(HISTORY_FILE, JSON.stringify(data, null, 2));
     } catch (e) { console.log('Failed to save history:', e.message); }
 }
-loadHistory(); // Load on startup
+loadHistory();
 
 // --- 3. KEY ROTATION ---
 const rawKeys = [
@@ -60,28 +61,25 @@ function rotateKey() {
     genAI = new GoogleGenerativeAI(rawKeys[currentKeyIndex]);
 }
 
-// --- 4. MEMORY SYSTEM (WITH PERSISTENCE) ---
+// --- 4. MEMORY SYSTEM ---
 function updateHistory(chatId, role, text) {
     if (!chatHistory.has(chatId)) chatHistory.set(chatId, []);
     const history = chatHistory.get(chatId);
     history.push({ role: role, parts: [{ text: text }] });
     if (history.length > 10) history.shift(); 
-    saveHistory(); // Persist after update
+    saveHistory();
 }
 
 // --- 5. EXAM SESSION MEMORY ---
 const quizSessions = new Map();
-// FIX: activePolls now stores { correctIndex, chatId } for accurate vote tracking
 const activePolls = new Map();
-
-// --- 6. FREE ANALYTICS & RATE LIMITING ---
 const usageStats = { messages: 0, quizzes: 0, errors: 0 };
-const rateLimit = new Map(); // In-memory rate limiter (free)
+const rateLimit = new Map();
 
 function checkRateLimit(chatId) {
     const now = Date.now();
     const window = 60000; // 1 minute
-    const maxRequests = 10; // Max 10 messages per minute per chat
+    const maxRequests = 10;
     if (!rateLimit.has(chatId)) rateLimit.set(chatId, []);
     const timestamps = rateLimit.get(chatId).filter(t => now - t < window);
     if (timestamps.length >= maxRequests) return false;
@@ -90,7 +88,7 @@ function checkRateLimit(chatId) {
     return true;
 }
 
-// --- 7. THE BRAIN ---
+// --- 6. THE BRAIN ---
 const MODEL_NAME = "gemini-2.0-flash";
 const SYSTEM_INSTRUCTION = `
 You are **Siddhartha's AI Assistant**.
@@ -99,7 +97,6 @@ You are **Siddhartha's AI Assistant**.
 - **QUIZ GENERATOR:** Read content and generate MCQs.
 - **FORMAT:** Output strictly **JSON**.
 - **TOPIC:** UPSC/General Knowledge.
-- **MULTI-LANGUAGE:** Respond in the user's detected language.
 
 **REQUIRED JSON FORMAT:**
 {
@@ -118,7 +115,7 @@ function getModel() {
         model: MODEL_NAME,
         systemInstruction: SYSTEM_INSTRUCTION,
         safetySettings: [
-            { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_MEDIUM }, // Tighter for safety
+            { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_MEDIUM },
             { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_MEDIUM },
             { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_MEDIUM },
             { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_MEDIUM }
@@ -126,7 +123,7 @@ function getModel() {
     });
 }
 
-// --- 8. WHATSAPP CLIENT ---
+// --- 7. WHATSAPP CLIENT ---
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
@@ -151,17 +148,17 @@ client.on('disconnected', (reason) => {
     process.exit(1); 
 });
 
-// --- 9. LIVE GRADING LISTENER (FIXED FOR VOTE COUNTING) ---
+// --- 8. LIVE GRADING LISTENER ---
 client.on('vote_update', async (vote) => {
     try {
         if (activePolls.has(vote.parentMessage.id.id)) {
-            const pollData = activePolls.get(vote.parentMessage.id.id); // Now { correctIndex, chatId }
+            const pollData = activePolls.get(vote.parentMessage.id.id);
             const { correctIndex, chatId } = pollData;
             
             if (quizSessions.has(chatId)) {
                 const session = quizSessions.get(chatId);
                 const voterId = vote.voter;
-                if (!session.scores.has(voterId)) session.scores.set(voterId, 0); // Ensure voter is initialized
+                if (!session.scores.has(voterId)) session.scores.set(voterId, 0);
                 let currentScore = session.scores.get(voterId);
                 const isCorrect = vote.selectedOptions.some(opt => opt.name === session.questions[session.index].options[correctIndex]);
                 
@@ -176,7 +173,7 @@ client.on('vote_update', async (vote) => {
     }
 });
 
-// --- 10. THE EXAM CONTROLLER LOOP ---
+// --- 9. THE EXAM CONTROLLER LOOP ---
 async function runQuizStep(chat, chatId) {
     try {
         const session = quizSessions.get(chatId);
@@ -202,20 +199,19 @@ async function runQuizStep(chat, chatId) {
                 }
             }
             await chat.sendMessage(report);
-            await chat.sendMessage("🏁 Quiz Completed. Export results by copying above!");
+            await chat.sendMessage("🏁 Quiz Completed.");
             quizSessions.delete(chatId);
             return;
         }
 
-        // B. SEND QUESTION WITH PROGRESS
+        // B. SEND QUESTION
         const q = session.questions[session.index];
         const progress = `Question ${session.index + 1}/${session.questions.length}`;
         const poll = new Poll(`${progress}\n${q.question}`, q.options, { allowMultipleAnswers: false });
         const sentMsg = await chat.sendMessage(poll);
-        // FIX: Store both correctIndex and chatId in activePolls
         activePolls.set(sentMsg.id.id, { correctIndex: q.correct_index, chatId });
 
-        // C. WAIT (MANUAL TIMER)
+        // C. WAIT (TIMER)
         setTimeout(async () => {
             try {
                 if (!quizSessions.has(chatId)) return;
@@ -240,13 +236,14 @@ async function runQuizStep(chat, chatId) {
     }
 }
 
-// --- 11. MAIN MESSAGE HANDLER ---
+// --- 10. MAIN MESSAGE HANDLER ---
 client.on('message', async msg => {
     try {
         const chat = await msg.getChat();
-        if (!chat.isGroup && !msg.body.includes("@")) return; // Allow private if mentioned
+        if (!chat.isGroup && !msg.body.includes("@")) return;
 
-        let prompt = sanitizeHtml(msg.body.replace(/@\S+/g, "").trim(), { allowedTags: [], allowedAttributes: {} }); // Sanitize input
+        // Sanitize Input
+        let prompt = sanitizeHtml(msg.body.replace(/@\S+/g, "").trim(), { allowedTags: [], allowedAttributes: {} });
 
         if (!checkRateLimit(chat.id._serialized)) {
             await msg.reply("⏳ Too many messages! Slow down.");
@@ -254,23 +251,23 @@ client.on('message', async msg => {
         }
         usageStats.messages++;
 
-        // NEW COMMANDS
+        // Commands
         if (prompt.toLowerCase().includes("help")) {
-            await msg.reply("🤖 **Commands:**\n- 'quiz [topic] [difficulty]' (e.g., 'easy quiz on history')\n- 'stop quiz'\n- 'status' (bot info)\n- 'reset history'\n- 'who are you'\nMention me with @ in groups!");
+            await msg.reply("🤖 **Commands:**\n- 'quiz [topic]'\n- 'stop quiz'\n- 'status'\n- 'reset history'");
             return;
         }
         if (prompt.toLowerCase().includes("status")) {
-            await msg.reply(`📈 **Bot Status:**\nMessages: ${usageStats.messages}\nQuizzes: ${usageStats.quizzes}\nErrors: ${usageStats.errors}\nUptime: ${process.uptime()}s`);
+            await msg.reply(`📈 **Status:**\nMsg: ${usageStats.messages}\nErrors: ${usageStats.errors}\nUptime: ${process.uptime()}s`);
             return;
         }
         if (prompt.toLowerCase().includes("reset history")) {
             chatHistory.delete(chat.id._serialized);
             saveHistory();
-            await msg.reply("🗑️ Chat history reset.");
+            await msg.reply("🗑️ History reset.");
             return;
         }
 
-        // STOP COMMAND
+        // STOP QUIZ
         if (prompt.toLowerCase().includes("stop quiz")) {
             if (quizSessions.has(chat.id._serialized)) {
                 quizSessions.get(chat.id._serialized).active = false;
@@ -283,34 +280,25 @@ client.on('message', async msg => {
         let mediaPart = null;
         let timerSeconds = 45; 
         let questionLimit = 10;
-        let difficulty = "medium"; // New: Default difficulty
-        let topic = "General Knowledge"; // FIX: Default topic, parsed from prompt
+        let difficulty = "medium";
+        let topic = "General Knowledge";
 
-        // PARSE TIMER
+        // PARSE PARAMS
         const timeMatch = prompt.match(/every (\d+)\s*(s|sec|min|m)/i);
         if (timeMatch) {
             let val = parseInt(timeMatch[1]);
             if (timeMatch[2].startsWith('m')) val *= 60;
             timerSeconds = Math.max(10, val);
         }
-
-        // PARSE QUESTION COUNT
         const countMatch = prompt.match(/(\d+)\s*(q|ques|question|mcq)/i);
         if (countMatch) {
-            let val = parseInt(countMatch[1]);
-            questionLimit = Math.min(val, 25);
-            questionLimit = Math.max(1, questionLimit);
+            questionLimit = Math.max(1, Math.min(parseInt(countMatch[1]), 25));
         }
-
-        // NEW: PARSE DIFFICULTY
         if (prompt.toLowerCase().includes("easy")) difficulty = "easy";
         else if (prompt.toLowerCase().includes("hard")) difficulty = "hard";
-
-        // FIX: PARSE TOPIC (e.g., "quiz on polity" -> "polity")
         const topicMatch = prompt.match(/quiz\s+on\s+(.+?)(?:\s|$)/i);
         if (topicMatch) topic = topicMatch[1].trim();
 
-        // Media Handling (Expanded)
         if (msg.hasMedia) {
             const media = await msg.downloadMedia();
             if (media.mimetype === 'application/pdf' || media.mimetype.startsWith('image/')) {
@@ -328,14 +316,12 @@ client.on('message', async msg => {
 
         if (!prompt && !mediaPart) return;
 
-        // Identity Check
         if (prompt.toLowerCase().match(/^(who are you|your name)/)) {
-            await msg.reply("I am Siddhartha's AI Assistant, Created By Siddhartha Vardhan Singh. Fully free and advanced!");
+            await msg.reply("I am Siddhartha's AI Assistant, Created By Siddhartha Vardhan Singh.");
             return;
         }
 
-        // AI GENERATION WITH FEEDBACK
-        await msg.reply("⏳ Generating response..."); // Feedback
+        await msg.reply("⏳ Thinking...");
         let success = false;
         let attempts = 0;
         let history = chatHistory.get(chat.id._serialized) || [];
@@ -348,8 +334,7 @@ client.on('message', async msg => {
                 
                 if (prompt.toLowerCase().includes("quiz") || mediaPart) {
                     usageStats.quizzes++;
-                    // FIX: Strict topic enforcement in prompt
-                    const finalPrompt = `[GENERATE QUIZ BATCH JSON - Difficulty: ${difficulty}, Strictly generate questions on "${topic}" based on the provided content. Do not include unrelated topics. Create exactly ${questionLimit} Questions] ${prompt}`;
+                    const finalPrompt = `[GENERATE QUIZ BATCH JSON - Difficulty: ${difficulty}, Topic: "${topic}". Create exactly ${questionLimit} Questions] ${prompt}`;
                     const content = mediaPart ? [finalPrompt, mediaPart] : [finalPrompt];
                     const result = await model.generateContent(content);
                     responseText = result.response.text();
@@ -361,5 +346,68 @@ client.on('message', async msg => {
                     updateHistory(chat.id._serialized, "model", responseText);
                 }
 
-                // SMART JSON PARSER
-                const cleanedResponse = responseText.replace(/
+                // --- THIS IS THE FIX ---
+                // We use a regex to clean markdown and extract just the JSON
+                const cleanedResponse = responseText.replace(/```json|```/g, '').trim();
+
+                if (cleanedResponse.startsWith('{')) {
+                    try {
+                        const data = JSON.parse(cleanedResponse);
+                        let questions = [];
+
+                        if (data.quizzes && Array.isArray(data.quizzes)) {
+                            questions = data.quizzes;
+                        } else if (data.questions && Array.isArray(data.questions)) {
+                             // Handle Fallback Format
+                             questions = data.questions.map(q => {
+                                let cIndex = 0;
+                                if (typeof q.correctAnswer === 'string') {
+                                    cIndex = q.options.indexOf(q.correctAnswer);
+                                    if (cIndex === -1) cIndex = 0;
+                                } else { cIndex = q.correctAnswer; }
+                                return {
+                                    question: q.questionText || q.question,
+                                    options: q.options,
+                                    correct_index: cIndex,
+                                    answer_explanation: q.explanation || q.answer_explanation
+                                };
+                            });
+                        }
+
+                        if (questions.length > 0) {
+                            questions = questions.slice(0, questionLimit);
+                            await msg.reply(`🎰 **Quiz Loaded!**\nTopic: ${data.topic || topic}\nQuestions: ${questions.length}\n⏱️ ${timerSeconds}s per question.`);
+                            
+                            quizSessions.set(chat.id._serialized, {
+                                questions: questions, index: 0, timer: timerSeconds, active: true, scores: new Map()
+                            });
+                            setTimeout(() => { runQuizStep(chat, chat.id._serialized); }, 3000);
+                        } else {
+                            await msg.reply(responseText);
+                        }
+                    } catch (e) {
+                        console.error("JSON Error:", e);
+                        await msg.reply(responseText);
+                    }
+                } else {
+                    await msg.reply(responseText);
+                }
+                
+                success = true;
+            } catch (error) {
+                console.error(`Attempt ${attempts} Failed:`, error.message);
+                if (error.message.includes("429")) rotateKey();
+                else break; 
+            }
+        }
+    } catch (err) {
+        console.error("Critical Error:", err);
+        usageStats.errors++;
+    }
+});
+
+// ANTI-CRASH
+process.on('uncaughtException', (err) => { console.error('⚠️ Exception:', err); });
+process.on('unhandledRejection', (err) => { console.error('⚠️ Rejection:', err); });
+
+client.initialize();
