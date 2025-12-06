@@ -131,6 +131,7 @@ function checkRateLimit(chatId) {
 // --- 6. THE BRAIN (GEMINI + RAG) ---
 const MODEL_NAME = "gemini-2.0-flash";
 const SYSTEM_INSTRUCTION = `You are an expert Mentor for Indian Govt Exams (UPSC, SSC, Railways). 
+VOICE CAPABILITY: You have a VOICE. If user says "speak" or "say hello", simply generate the text. The system will auto-speak it. Do NOT say "I am text based".
 STYLE: Crisp, Bullet-points, High-Yield Facts only. No fluff. 
 STRUCTURE: 
 1. Direct Answer. 
@@ -322,45 +323,53 @@ async function startClient() {
 }
 
 // --- 9. VOTE HANDLER ---
+// --- 9. VOTE HANDLER (CRITICAL FIX) ---
 async function handleVote(vote) {
     try {
-        if (!activePolls.has(vote.parentMessage.id.id)) return;
-        const { correctIndex, chatId, questionIndex } = activePolls.get(vote.parentMessage.id.id);
+        const msgId = vote.parentMessage.id.id;
+        if (!activePolls.has(msgId)) return; // Vote on old/untracked poll
 
+        const { correctIndex, chatId, questionIndex } = activePolls.get(msgId);
         if (!quizSessions.has(chatId)) return;
+
         const session = quizSessions.get(chatId);
 
-        // Safety: Ensure session is still on the same question
+        // 🛡️ Verify we are on the correct question index
         if (questionIndex !== session.index) return;
 
         const voterId = vote.voter;
         const uniqueVoteKey = `${session.index}_${voterId}`;
 
-        // 🛡️ Prevent Duplicate Processing
+        // 🛡️ Prevent Double Counting
         if (session.creditedVotes.has(uniqueVoteKey)) return;
-        session.creditedVotes.add(uniqueVoteKey); // Mark as voted immediately
 
+        session.creditedVotes.add(uniqueVoteKey); // Mark voted immediately to prevent race conditions
+
+        // Ensure score entry exists
         if (!session.scores.has(voterId)) session.scores.set(voterId, 0);
 
-        // 🛡️ Crash-Proof Answer Check
         try {
             const currentQ = session.questions[session.index];
             if (!currentQ || !currentQ.options) return;
 
-            // Safe trim helper
-            const safeTrim = (str) => (typeof str === 'string' ? str.trim() : "");
+            // 🔍 ROBUST COMPARISON LOGIC
+            // Normalize: Trim + Lowercase
+            const normalize = (str) => (str ? String(str).trim().toLowerCase() : "");
+            const correctText = normalize(currentQ.options[correctIndex]);
 
-            const correctOptionText = safeTrim(currentQ.options[correctIndex]);
-            const isCorrect = vote.selectedOptions.some(opt => safeTrim(opt.name) === correctOptionText);
+            // Check all selected options (Whatsapp allows multi-select in some versions, though we force single)
+            const isCorrect = vote.selectedOptions.some(opt => normalize(opt.name) === correctText);
+
+            console.log(`🗳️ Vote: ${voterId} | Selected: ${JSON.stringify(vote.selectedOptions.map(o => o.name))} | Expected: ${correctText} | Correct? ${isCorrect}`);
 
             if (isCorrect) {
                 session.scores.set(voterId, session.scores.get(voterId) + 1);
             }
         } catch (innerErr) {
-            console.error("⚠️ Error calculating score (vote counted as attempt):", innerErr.message);
+            console.error("⚠️ Vote Logic Error:", innerErr);
         }
     } catch (err) {
-        console.error("❌ Fatal Vote Error (Safely Ignored):", err.message);
+        console.error("❌ Fatal Vote Error:", err);
     }
 }
 
@@ -369,11 +378,11 @@ async function sendMockTestSummaryWithAnswers(chat, chatId) {
     const session = quizSessions.get(chatId);
     if (!session) return;
 
-    let template = `📘 *MockTest Summary — ${session.topic || 'General'}*\n\n`;
+    let template = `📘 *DETAILED SOLUTIONS* 📘\n*Topic:* ${session.topic || 'General'}\n──────────────────\n\n`;
     session.questions.forEach((q, idx) => {
         const correct = q.options[q.correct_index];
-        const expl = q.answer_explanation || "—";
-        template += `*Q${idx + 1}.* ${q.question}\n✅ *Ans:* ${correct}\n💡 *Exp:* ${expl}\n\n`;
+        const expl = q.answer_explanation || "No explanation provided.";
+        template += `*Q${idx + 1}.* ${q.question}\n\n✅ *Answer:* ${correct}\n💡 *Concept:* ${expl}\n──────────────────\n\n`;
     });
 
     if (template.length > 2000) {
@@ -390,25 +399,35 @@ async function runQuizStep(chat, chatId) {
     if (!session || !session.active) return;
 
     if (session.index >= session.questions.length) {
-        let report = "📊 **FINAL REPORT CARD** 📊\n\n";
+        // --- PROFESSIONAL LEADERBOARD ---
+        let report = `🏆 *OFFICIAL RANK LIST* 🏆\n\n*Subject:* ${session.topic || 'General'}\n*Questions:* ${session.questions.length}\n──────────────────\n`;
         const sortedScores = [...session.scores.entries()].sort((a, b) => b[1] - a[1]);
-        if (sortedScores.length === 0) report += "No votes recorded.";
+
+        if (sortedScores.length === 0) report += "❌ No candidates attempted the test.";
         else {
             let rank = 1;
+            let total = session.questions.length;
             for (const [contactId, score] of sortedScores) {
                 let name = contactId.replace('@c.us', '');
                 try {
                     const contact = await client.getContactById(contactId);
                     if (contact.pushname) name = contact.pushname;
                 } catch (e) { }
-                let medal = rank === 1 ? '🥇' : (rank === 2 ? '🥈' : (rank === 3 ? '🥉' : '🔹'));
-                report += `${medal} *${name}*: ${score} pts\n`;
+
+                let medal = '🎖️';
+                if (rank === 1) medal = '🥇 *TOPPER*';
+                if (rank === 2) medal = '🥈';
+                if (rank === 3) medal = '🥉';
+
+                const percent = Math.round((score / total) * 100);
+                report += `${medal} ${name}\n📊 Score: ${score}/${total} (${percent}%)\n\n`;
                 rank++;
             }
         }
+        report += `──────────────────\n🏁 *Test Concluded*`;
+
         await chat.sendMessage(report);
         await sendMockTestSummaryWithAnswers(chat, chatId);
-        await chat.sendMessage("🏁 Quiz Ended.");
         quizSessions.delete(chatId);
         return;
     }
@@ -421,16 +440,14 @@ async function runQuizStep(chat, chatId) {
     setTimeout(async () => {
         if (!quizSessions.has(chatId)) return;
 
-        // 🛡️ Safety: Fix "undefined" answer bug
-        let correctOpt = "Check Summary";
-        if (q.options && typeof q.correct_index === 'number' && q.options[q.correct_index]) {
-            correctOpt = q.options[q.correct_index];
-        }
+        // 🤐 SILENT MODE: No reply here. Users check report card at the end.
 
-        await sentMsg.reply(`⏰ **Time's Up!**\n✅ **Answer:** ${correctOpt}`);
+        // We MUST keep the poll active for a split second longer in case of race conditions, 
+        // but we delete it before moving to prevent late votes.
         activePolls.delete(sentMsg.id.id);
+
         session.index++;
-        setTimeout(() => { runQuizStep(chat, chatId); }, 3000);
+        setTimeout(() => { runQuizStep(chat, chatId); }, 1000); // Faster transition (1s)
     }, session.timer * 1000);
 }
 
@@ -471,7 +488,7 @@ async function handleImageGeneration(msg, prompt) {
     try {
         // Pollinations.ai (Free, No Key)
         const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1024&height=1024&nologo=true`;
-        const media = await MessageMedia.fromUrl(imageUrl);
+        const media = await MessageMedia.fromUrl(imageUrl, { unsafeMime: true });
         await msg.reply(media);
     } catch (e) {
         console.error("Image Gen Error:", e);
@@ -590,6 +607,23 @@ async function handleMessage(msg) {
     let pdfBuffer = null;
     let messageWithMedia = msg.hasMedia ? msg : (msg.hasQuotedMsg ? await msg.getQuotedMessage() : null);
 
+    // ♾️ INFINITE POLLS (AUTO-GENERATE FROM NEWS)
+    if (prompt.match(/^(daily polls|daily quiz|news quiz)/i)) {
+        if (!process.env.TAVILY_API_KEY) return msg.reply("⚠️ Tavily Key required for Daily Polls.");
+        await msg.reply("🌍 Fetching today's top news for the quiz...");
+
+        try {
+            const date = new Date().toDateString();
+            const searchRes = await handleWebSearch(msg, `Important current affairs questions India ${date} UPSC SSC`);
+            if (searchRes) {
+                // We hijack the prompt to force the AI to make a quiz from this text
+                prompt = `GENERATE QUIZ BATCH from these search results: ${searchRes}`;
+                topic = `Daily News (${date})`;
+                questionLimit = 5; // Keep it short and fresh
+            }
+        } catch (e) { console.error(e); }
+    }
+
     if (messageWithMedia && messageWithMedia.hasMedia) {
         const media = await messageWithMedia.downloadMedia();
         if (media) {
@@ -670,11 +704,22 @@ async function handleMessage(msg) {
     const isQuiz = prompt.toLowerCase().includes("quiz") || prompt.toLowerCase().includes("test") || prompt.toLowerCase().includes("mcq");
 
     // 🧠 LOAD USER PROFILE
+    // 🧠 LOAD DATA PARALLEL (SPEED BOOST ⚡)
     let userProfile = null;
+    let ragContext = null;
+
     try {
-        const contact = await msg.getContact();
+        const contactPromise = msg.getContact();
+        const ragPromise = queryPinecone(prompt);
+
+        // Wait for both simultaneously
+        const [contact, ragResult] = await Promise.all([contactPromise, ragPromise]);
+
+        ragContext = ragResult;
         const name = contact.pushname || "Friend";
-        userProfile = updateUserProfile(msg.from, name, isQuiz ? topic : "Chat");
+        // Fire and forget update (don't await this for speed)
+        updateUserProfile(msg.from, name, isQuiz ? topic : "Chat").then(p => userProfile = p).catch(e => { });
+
     } catch (e) { }
 
     try {
@@ -692,21 +737,9 @@ async function handleMessage(msg) {
             // 🧠 INJECT PROFILE + RAG + WEB CONTEXT
             let systemContext = "";
 
-            // 0. Web Search Results (Highest Priority)
-            if (webContext) {
-                systemContext += `[REAL-TIME WEB SEARCH RESULTS: ${webContext}]\n(Use these results to answer the user's question accurately.)\n`;
-            }
-
-            // 1. RAG Retrieve
-            const ragContext = await queryPinecone(prompt);
-            if (ragContext) {
-                systemContext += `[FACTS FROM MEMORY: ${ragContext}]\n`;
-            }
-
-            // 2. User Profile
-            if (userProfile) {
-                systemContext += `[User Info: Name="${userProfile.name}", LastTopic="${userProfile.lastTopic}", HighScore=${userProfile.highScore}]\n`;
-            }
+            if (webContext) systemContext += `[REAL-TIME SEARCH: ${webContext}]\n`;
+            if (ragContext) systemContext += `[MEMORY: ${ragContext}]\n`;
+            if (userProfile) systemContext += `[User: ${userProfile.name}, XP: ${userProfile.highScore}]\n`;
 
             if (mediaPart) {
                 const content = [systemContext + (prompt || "Analyze this"), mediaPart];
@@ -744,8 +777,8 @@ async function handleMessage(msg) {
             } catch (e) { await msg.reply("⚠️ AI formatting error."); }
         } else if (!isQuiz) {
             // 🗣️ LEVEL 5: VOICE MODE (SPEAKING)
-            // If the user sent an audio message (PTT/Audio), we reply with Audio.
-            const isVoiceMessage = msg.type === 'ptt' || msg.type === 'audio';
+            // If the user sent an audio message (PTT/Audio) OR explicitly asks to "speak", we reply with Audio.
+            const isVoiceMessage = msg.type === 'ptt' || msg.type === 'audio' || prompt.match(/\b(speak|say|voice|tell me in voice)\b/i);
 
             if (isVoiceMessage) {
                 try {
