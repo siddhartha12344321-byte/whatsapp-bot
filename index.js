@@ -355,9 +355,7 @@ async function handleMessage(msg) {
     // 1. Groups: ONLY respond if mentioned (@Bot)
     // 2. DMs: Respond to everything
     if (chat.isGroup) {
-        const mentions = await msg.getMentions();
-        const isMentioned = mentions.some(c => c.isMe);
-        if (!isMentioned) return;
+        if (!msg.mentionedIds.includes(client.info.wid._serialized)) return;
     }
 
     // Clean prompt: remove mentions to avoid confusing the AI
