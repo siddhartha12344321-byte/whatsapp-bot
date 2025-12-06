@@ -1,19 +1,16 @@
 {
   "name": "whatsapp-gemini-bot",
-  "version": "10.0.0",
-  "description": "WhatsApp Bot - Fixed Browser",
+  "version": "8.0.0",
+  "description": "WhatsApp Bot for Students",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "whatsapp-web.js": "^1.23.0",
-    "puppeteer": "^19.11.1",
     "qrcode-terminal": "^0.12.0",
-    "qrcode": "^1.5.3",
     "@google/generative-ai": "^0.21.0",
-    "express": "^4.19.2",
-    "sanitize-html": "^2.11.0"
+    "express": "^4.19.2"
   },
   "engines": {
     "node": ">=18.0.0"
