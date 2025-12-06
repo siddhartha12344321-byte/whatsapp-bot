@@ -29,11 +29,11 @@ const HISTORY_FILE = 'chatHistory.json';
 let chatHistory = new Map();
 function loadHistory() {
     if (fs.existsSync(HISTORY_FILE)) {
-        try { chatHistory = new Map(Object.entries(JSON.parse(fs.readFileSync(HISTORY_FILE)))); } catch(e){}
+        try { chatHistory = new Map(Object.entries(JSON.parse(fs.readFileSync(HISTORY_FILE)))); } catch (e) { }
     }
 }
 function saveHistory() {
-    try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(Object.fromEntries(chatHistory))); } catch(e){}
+    try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(Object.fromEntries(chatHistory))); } catch (e) { }
 }
 loadHistory();
 
@@ -76,7 +76,7 @@ const MODEL_NAME = "gemini-2.0-flash";
 const SYSTEM_INSTRUCTION = `You are Siddhartha's AI. QUIZ PROTOCOL: If user asks for Quiz/MCQ -> OUTPUT STRICT JSON: {"type": "quiz_batch", "topic": "Subject", "quizzes": [{"question": "...", "options": ["..."], "correct_index": 0, "answer_explanation": "..."}]}`;
 
 function getModel() {
-    return genAI.getGenerativeModel({ 
+    return genAI.getGenerativeModel({
         model: MODEL_NAME,
         systemInstruction: SYSTEM_INSTRUCTION,
         safetySettings: [
@@ -96,7 +96,7 @@ async function extractTextFromPDF(buffer) {
     } catch (e) { return ""; }
 }
 
-async function generateQuizFromPdfBuffer({ pdfBuffer, topic='General', qty=10, difficulty='medium' }) {
+async function generateQuizFromPdfBuffer({ pdfBuffer, topic = 'General', qty = 10, difficulty = 'medium' }) {
     const text = await extractTextFromPDF(pdfBuffer);
     if (!text || text.trim().length < 50) throw new Error("PDF empty");
 
@@ -107,7 +107,7 @@ async function generateQuizFromPdfBuffer({ pdfBuffer, topic='General', qty=10, d
     const responseText = result.response.text();
     const jsonMatch = responseText.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error("No JSON found");
-    
+
     const data = JSON.parse(jsonMatch[0]);
     let questions = data.quizzes || data.questions;
     return questions.map(q => {
@@ -139,27 +139,43 @@ async function startClient() {
     }
 
     try {
-        chromium.setHeadlessMode = true;
-        chromium.setGraphicsMode = false;
-
-        client = new Client({
-            authStrategy: new LocalAuth(), // Will create a new session now
-            puppeteer: {
+        let puppetConfig;
+        if (process.platform === 'win32') {
+            const bravePath = `${process.env.LOCALAPPDATA}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`;
+            console.log(`🖥️ Windows detected. Using Local Brave: ${bravePath}`);
+            puppetConfig = {
+                executablePath: bravePath,
+                headless: false, // Headless: false is more stable for local WhatsApp Web
+                args: ['--no-sandbox', '--disable-setuid-sandbox']
+            };
+        } else {
+            console.log('🐧 Linux/Render detected. Using @sparticuz/chromium');
+            chromium.setHeadlessMode = true;
+            chromium.setGraphicsMode = false;
+            puppetConfig = {
                 args: [
                     ...chromium.args,
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
-                    '--disable-gpu',
                     '--disable-dev-shm-usage',
+                    '--disable-accelerated-2d-canvas',
                     '--no-first-run',
-                    '--single-process'
+                    '--no-zygote',
+                    '--disable-gpu',
+                    '--disable-features=IsolateOrigins,site-per-process',
+                    '--disable-software-rasterizer'
                 ],
                 defaultViewport: chromium.defaultViewport,
                 executablePath: await chromium.executablePath(),
                 headless: chromium.headless,
                 ignoreHTTPSErrors: true,
-                timeout: 120000 
-            }
+                timeout: 120000
+            };
+        }
+
+        client = new Client({
+            authStrategy: new LocalAuth(), // Will create a new session now
+            puppeteer: puppetConfig
         });
 
         client.on('qr', (qr) => {
@@ -172,10 +188,10 @@ async function startClient() {
             console.log('✅ Siddhartha\'s AI is Online!');
             qrCodeData = "";
         });
-        
+
         client.on('disconnected', (reason) => {
             console.log('❌ Disconnected:', reason);
-            process.exit(1); 
+            process.exit(1);
         });
 
         client.on('vote_update', handleVote);
@@ -195,16 +211,16 @@ async function handleVote(vote) {
         if (quizSessions.has(chatId)) {
             const session = quizSessions.get(chatId);
             const voterId = vote.voter;
-            
+
             if (questionIndex !== session.index) return;
             if (!session.scores.has(voterId)) session.scores.set(voterId, 0);
-            
+
             const uniqueVoteKey = `${session.index}_${voterId}`;
             if (session.creditedVotes.has(uniqueVoteKey)) return;
 
             const correctOptionText = session.questions[session.index].options[correctIndex];
             const isCorrect = vote.selectedOptions.some(opt => opt.name.trim() === correctOptionText.trim());
-            
+
             if (isCorrect) {
                 session.scores.set(voterId, session.scores.get(voterId) + 1);
                 session.creditedVotes.add(uniqueVoteKey);
@@ -217,7 +233,7 @@ async function handleVote(vote) {
 async function sendMockTestSummaryWithAnswers(chat, chatId) {
     const session = quizSessions.get(chatId);
     if (!session) return;
-    
+
     let template = `📘 *MockTest Summary — ${session.topic || 'General'}*\n\n`;
     session.questions.forEach((q, idx) => {
         const correct = q.options[q.correct_index];
@@ -249,7 +265,7 @@ async function runQuizStep(chat, chatId) {
                 try {
                     const contact = await client.getContactById(contactId);
                     if (contact.pushname) name = contact.pushname;
-                } catch(e) {}
+                } catch (e) { }
                 let medal = rank === 1 ? '🥇' : (rank === 2 ? '🥈' : (rank === 3 ? '🥉' : '🔹'));
                 report += `${medal} *${name}*: ${score} pts\n`;
                 rank++;
@@ -263,7 +279,7 @@ async function runQuizStep(chat, chatId) {
     }
 
     const q = session.questions[session.index];
-    const poll = new Poll(`Q${session.index+1}: ${q.question}`, q.options, { allowMultipleAnswers: false });
+    const poll = new Poll(`Q${session.index + 1}: ${q.question}`, q.options, { allowMultipleAnswers: false });
     const sentMsg = await chat.sendMessage(poll);
     activePolls.set(sentMsg.id.id, { correctIndex: q.correct_index, chatId, questionIndex: session.index });
 
@@ -281,15 +297,15 @@ async function runQuizStep(chat, chatId) {
 async function handleTextAsVoteFallback(msg, chat, prompt) {
     if (!quizSessions.has(chat.id._serialized)) return false;
     const session = quizSessions.get(chat.id._serialized);
-    
+
     const letterMatch = prompt.match(/^\s*([A-Da-d])\s*$/);
     const numMatch = prompt.match(/^\s*([1-4])\s*$/);
-    
+
     let chosenIndex = -1;
-    if (letterMatch) chosenIndex = letterMatch[1].toUpperCase().charCodeAt(0) - 65; 
+    if (letterMatch) chosenIndex = letterMatch[1].toUpperCase().charCodeAt(0) - 65;
     else if (numMatch) chosenIndex = parseInt(numMatch[1]) - 1;
-    
-    if (chosenIndex === -1) return false; 
+
+    if (chosenIndex === -1) return false;
 
     const voterId = msg.from;
     const uniqueVoteKey = `${session.index}_${voterId}`;
@@ -300,10 +316,10 @@ async function handleTextAsVoteFallback(msg, chat, prompt) {
         if (!session.scores.has(voterId)) session.scores.set(voterId, 0);
         session.scores.set(voterId, session.scores.get(voterId) + 1);
         session.creditedVotes.add(uniqueVoteKey);
-        await msg.react('✅'); 
+        await msg.react('✅');
     } else {
-        await msg.react('❌'); 
-        session.creditedVotes.add(uniqueVoteKey); 
+        await msg.react('❌');
+        session.creditedVotes.add(uniqueVoteKey);
     }
     return true;
 }
@@ -312,7 +328,7 @@ async function handleTextAsVoteFallback(msg, chat, prompt) {
 async function handleMessage(msg) {
     const chat = await msg.getChat();
     if (chat.isGroup && !msg.body.includes("@")) return;
-    
+
     let prompt = sanitizeHtml(msg.body.replace(/@\S+/g, "").trim());
     if (!checkRateLimit(chat.id._serialized)) return;
 
@@ -334,7 +350,7 @@ async function handleMessage(msg) {
 
     const timeMatch = prompt.match(/every (\d+)\s*(s|sec|min|m)/i);
     if (timeMatch) timerSeconds = parseInt(timeMatch[1]) * (timeMatch[2].startsWith('m') ? 60 : 1);
-    
+
     const countMatch = prompt.match(/(\d+)\s*(q|ques|question)/i);
     if (countMatch) questionLimit = Math.min(parseInt(countMatch[1]), 25);
 
@@ -345,13 +361,13 @@ async function handleMessage(msg) {
 
     let pdfBuffer = null;
     let messageWithMedia = msg.hasMedia ? msg : (msg.hasQuotedMsg ? await msg.getQuotedMessage() : null);
-    
+
     if (messageWithMedia && messageWithMedia.hasMedia) {
         const media = await messageWithMedia.downloadMedia();
         if (media) {
             if (media.mimetype === 'application/pdf') {
                 pdfBuffer = Buffer.from(media.data, 'base64');
-                mediaPart = { inlineData: { data: media.data, mimeType: media.mimetype } }; 
+                mediaPart = { inlineData: { data: media.data, mimeType: media.mimetype } };
             } else if (media.mimetype.startsWith('image/')) {
                 mediaPart = { inlineData: { data: media.data, mimeType: media.mimetype } };
             }
@@ -367,7 +383,7 @@ async function handleMessage(msg) {
         try {
             const questions = await generateQuizFromPdfBuffer({ pdfBuffer, topic, qty: questionLimit, difficulty });
             await msg.reply(`🎰 **Mock Test Ready!**\nQs: ${questions.length} | Timer: ${timerSeconds}s`);
-            
+
             quizSessions.set(chat.id._serialized, {
                 questions, index: 0, timer: timerSeconds, active: true, scores: new Map(), creditedVotes: new Set(), topic
             });
@@ -381,11 +397,11 @@ async function handleMessage(msg) {
 
     // GENERAL AI / IMAGE / QUIZ
     const isQuiz = prompt.toLowerCase().includes("quiz") || prompt.toLowerCase().includes("test") || prompt.toLowerCase().includes("mcq");
-    
+
     try {
         const model = getModel();
         let responseText = "";
-        
+
         if (isQuiz) {
             const finalPrompt = `[GENERATE QUIZ BATCH JSON - Count: ${questionLimit}, Topic: "${topic}", Difficulty: ${difficulty}] ${prompt}`;
             const content = mediaPart ? [finalPrompt, mediaPart] : [finalPrompt];
@@ -407,7 +423,7 @@ async function handleMessage(msg) {
         }
 
         const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-        
+
         if (isQuiz && jsonMatch) {
             try {
                 const data = JSON.parse(jsonMatch[0]);
