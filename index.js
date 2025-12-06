@@ -25,17 +25,7 @@ app.get('/qr', async (req, res) => {
 app.listen(port, () => console.log(`Server running on port ${port}`));
 
 // --- 2. PERSISTENCE ---
-const HISTORY_FILE = 'chatHistory.json';
-let chatHistory = new Map();
-function loadHistory() {
-    if (fs.existsSync(HISTORY_FILE)) {
-        try { chatHistory = new Map(Object.entries(JSON.parse(fs.readFileSync(HISTORY_FILE)))); } catch (e) { }
-    }
-}
-function saveHistory() {
-    try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(Object.fromEntries(chatHistory))); } catch (e) { }
-}
-loadHistory();
+// (Moved to Memory Section below to avoid duplicates)
 
 // --- 3. KEY ROTATION ---
 const rawKeys = [process.env.GEMINI_API_KEY_2, process.env.GEMINI_API_KEY].filter(k => k);
@@ -47,12 +37,50 @@ function rotateKey() {
     genAI = new GoogleGenerativeAI(rawKeys[currentKeyIndex]);
 }
 
-// --- 4. MEMORY ---
+// --- 4. MEMORY & USER DATABASE ---
+const HISTORY_FILE = 'chatHistory.json';
+const USER_DB_FILE = 'user_db.json';
+let chatHistory = new Map();
+let userDatabase = new Map();
+
+function loadHistory() {
+    if (fs.existsSync(HISTORY_FILE)) {
+        try { chatHistory = new Map(Object.entries(JSON.parse(fs.readFileSync(HISTORY_FILE)))); } catch (e) { }
+    }
+}
+function saveHistory() {
+    try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(Object.fromEntries(chatHistory))); } catch (e) { }
+}
+function loadUserDatabase() {
+    if (fs.existsSync(USER_DB_FILE)) {
+        try { userDatabase = new Map(Object.entries(JSON.parse(fs.readFileSync(USER_DB_FILE)))); } catch (e) { }
+    }
+}
+function saveUserDatabase() {
+    try { fs.writeFileSync(USER_DB_FILE, JSON.stringify(Object.fromEntries(userDatabase))); } catch (e) { }
+}
+function updateUserProfile(userId, name, topic, scoreToAdd = 0) {
+    if (!userDatabase.has(userId)) userDatabase.set(userId, { name: name || 'Friend', highScore: 0, lastTopic: 'General', joined: Date.now() });
+    const profile = userDatabase.get(userId);
+    if (name) profile.name = name;
+    if (topic) profile.lastTopic = topic;
+    if (scoreToAdd > 0) {
+        if (!profile.score) profile.score = 0; // Legacy fix
+        profile.score += scoreToAdd;
+        if (scoreToAdd > profile.highScore) profile.highScore = scoreToAdd; // Simple high score logic (per session score usually)
+    }
+    saveUserDatabase();
+    return profile;
+}
+
+loadHistory();
+loadUserDatabase();
+
 function updateHistory(chatId, role, text) {
     if (!chatHistory.has(chatId)) chatHistory.set(chatId, []);
     const history = chatHistory.get(chatId);
     history.push({ role, parts: [{ text }] });
-    if (history.length > 8) history.shift();
+    if (history.length > 15) history.shift(); // Increased context depth
     saveHistory();
 }
 
@@ -308,7 +336,13 @@ async function runQuizStep(chat, chatId) {
 
     setTimeout(async () => {
         if (!quizSessions.has(chatId)) return;
-        const correctOpt = q.options[q.correct_index];
+
+        // 🛡️ Safety: Fix "undefined" answer bug
+        let correctOpt = "Check Summary";
+        if (q.options && typeof q.correct_index === 'number' && q.options[q.correct_index]) {
+            correctOpt = q.options[q.correct_index];
+        }
+
         await sentMsg.reply(`⏰ **Time's Up!**\n✅ **Answer:** ${correctOpt}`);
         activePolls.delete(sentMsg.id.id);
         session.index++;
@@ -356,7 +390,11 @@ async function handleMessage(msg) {
     // 2. DMs: Respond to everything
     if (chat.isGroup) {
         const hasActiveSession = quizSessions.has(chat.id._serialized);
-        const isMentioned = msg.mentionedIds.includes(client.info.wid._serialized);
+
+        // 🛡️ Improved Detect: Library `mentionedIds` + Raw Text Check (Backup)
+        const myId = client.info.wid._serialized;
+        const myNumber = client.info.wid.user;
+        const isMentioned = msg.mentionedIds.includes(myId) || msg.body.includes(`@${myNumber}`);
 
         // If not directly addressed AND not in an active conversation/quiz, ignore.
         if (!isMentioned && !hasActiveSession) return;
@@ -446,6 +484,14 @@ async function handleMessage(msg) {
     // GENERAL AI / IMAGE / QUIZ
     const isQuiz = prompt.toLowerCase().includes("quiz") || prompt.toLowerCase().includes("test") || prompt.toLowerCase().includes("mcq");
 
+    // 🧠 LOAD USER PROFILE
+    let userProfile = null;
+    try {
+        const contact = await msg.getContact();
+        const name = contact.pushname || "Friend";
+        userProfile = updateUserProfile(msg.from, name, isQuiz ? topic : "Chat");
+    } catch (e) { }
+
     try {
         const model = getModel();
         let responseText = "";
@@ -457,13 +503,20 @@ async function handleMessage(msg) {
             responseText = result.response.text();
         } else {
             let history = chatHistory.get(chat.id._serialized) || [];
+
+            // 🧠 INJECT PROFILE INTO CONTEXT
+            let systemContext = "";
+            if (userProfile) {
+                systemContext = `[User Info: Name="${userProfile.name}", LastTopic="${userProfile.lastTopic}", HighScore=${userProfile.highScore}]\n`;
+            }
+
             if (mediaPart) {
-                const content = [prompt || "Analyze this", mediaPart];
+                const content = [systemContext + (prompt || "Analyze this"), mediaPart];
                 const result = await model.generateContent(content);
                 responseText = result.response.text();
             } else {
                 const chatSession = model.startChat({ history });
-                const result = await chatSession.sendMessage(prompt);
+                const result = await chatSession.sendMessage(systemContext + prompt);
                 responseText = result.response.text();
                 updateHistory(chat.id._serialized, "user", prompt);
                 updateHistory(chat.id._serialized, "model", responseText);
