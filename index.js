@@ -9,6 +9,11 @@ const chromium = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
 const pdfParse = require('pdf-parse');
 const mongoose = require('mongoose');
+const { Pinecone } = require('@pinecone-database/pinecone');
+
+// 🌲 PINECONE CONNECTION (VECTOR DB)
+const pc = new Pinecone({ apiKey: process.env.PINECONE_API_KEY || 'pcsk_4YGs7G_FB4bw1RbEejhHeiwEeL8wrU2vS1vQfFS2TcdhxJjsrehCHMyeFtHw4cHJkWPZvc' });
+const indexName = 'whatsapp-bot';
 
 // 🔌 MONGODB CONNECTION
 // NOTE: Ideally, use process.env.MONGODB_URI. We add the fallback for immediate usage as requested.
@@ -122,7 +127,7 @@ function checkRateLimit(chatId) {
     return true;
 }
 
-// --- 6. THE BRAIN ---
+// --- 6. THE BRAIN (GEMINI + RAG) ---
 const MODEL_NAME = "gemini-2.0-flash";
 const SYSTEM_INSTRUCTION = `You are Siddhartha's AI. QUIZ PROTOCOL: If user asks for Quiz/MCQ -> OUTPUT STRICT JSON: {"type": "quiz_batch", "topic": "Subject", "quizzes": [{"question": "...", "options": ["..."], "correct_index": 0, "answer_explanation": "..."}]}`;
 
@@ -137,6 +142,55 @@ function getModel() {
             { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE }
         ]
     });
+}
+
+// 🧠 RAG HELPERS
+async function getEmbedding(text) {
+    const model = genAI.getGenerativeModel({ model: "text-embedding-004" });
+    const result = await model.embedContent(text);
+    return result.embedding.values;
+}
+
+async function upsertToPinecone(text, filename) {
+    // 1. Chunk Text (Simple 500 char chunks)
+    const chunks = text.match(/.{1,500}/g) || [];
+    const index = pc.index(indexName);
+    const vectors = [];
+
+    for (let i = 0; i < chunks.length; i++) {
+        const chunk = chunks[i];
+        const embedding = await getEmbedding(chunk);
+        vectors.push({
+            id: `${filename}_${i}`,
+            values: embedding,
+            metadata: { text: chunk, filename }
+        });
+    }
+
+    // Batch Upsert
+    await index.upsert(vectors);
+    console.log(`🌲 Upserted ${vectors.length} chunks to Pinecone.`);
+}
+
+async function queryPinecone(queryText) {
+    try {
+        const index = pc.index(indexName);
+        const embedding = await getEmbedding(queryText);
+        const queryResponse = await index.query({
+            vector: embedding,
+            topK: 3,
+            includeMetadata: true
+        });
+
+        if (queryResponse.matches.length > 0) {
+            return queryResponse.matches
+                .filter(m => m.score > 0.5) // Relevance Threshold
+                .map(m => m.metadata.text).join("\n\n");
+        }
+    } catch (e) {
+        console.error("Pinecone Query Error:", e);
+    }
+    return null;
 }
 
 // --- 7. PDF HELPER (GEMINI VISION OCR) ---
@@ -486,7 +540,24 @@ async function handleMessage(msg) {
     if (!prompt && !mediaPart) return;
     if (prompt.toLowerCase().match(/^(who are you|your name)/)) return msg.reply("I am Siddhartha's AI Assistant.");
 
-    // PDF MOCK TEST LOGIC
+    // PDF MOCK TEST / LEARNING LOGIC
+    if (pdfBuffer) {
+        // A. LEARNING MODE (Ingest to RAG)
+        if (prompt.toLowerCase().includes("learn") || prompt.toLowerCase().includes("save") || prompt.toLowerCase().includes("read")) {
+            await msg.reply(`🧠 Reading & Memorizing Document...`);
+            try {
+                const data = await pdfParse(pdfBuffer);
+                await upsertToPinecone(data.text, "UserUpload_" + Date.now());
+                await msg.reply("✅ Memorized! I can now recall this information.");
+            } catch (e) {
+                console.error(e);
+                await msg.reply("❌ Failed to memorize.");
+            }
+            return;
+        }
+    }
+
+    // B. EXISTING MOCK TEST LOGIC
     if (pdfBuffer && (prompt.toLowerCase().includes("mocktest") || prompt.toLowerCase().includes("quiz"))) {
         await msg.reply(`🔎 Generating Mock Test from PDF: ${topic}...`);
         try {
@@ -527,10 +598,18 @@ async function handleMessage(msg) {
         } else {
             let history = chatHistory.get(chat.id._serialized) || [];
 
-            // 🧠 INJECT PROFILE INTO CONTEXT
+            // 🧠 INJECT PROFILE + RAG CONTEXT
             let systemContext = "";
+
+            // 1. RAG Retrieve
+            const ragContext = await queryPinecone(prompt);
+            if (ragContext) {
+                systemContext += `[FACTS FROM MEMORY: ${ragContext}]\n`;
+            }
+
+            // 2. User Profile
             if (userProfile) {
-                systemContext = `[User Info: Name="${userProfile.name}", LastTopic="${userProfile.lastTopic}", HighScore=${userProfile.highScore}]\n`;
+                systemContext += `[User Info: Name="${userProfile.name}", LastTopic="${userProfile.lastTopic}", HighScore=${userProfile.highScore}]\n`;
             }
 
             if (mediaPart) {
