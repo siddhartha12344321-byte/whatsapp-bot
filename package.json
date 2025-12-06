@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-gemini-bot",
-  "version": "12.0.0",
-  "description": "WhatsApp Bot - Ultimate Edition",
+  "version": "16.0.0",
+  "description": "WhatsApp Bot - Force QR Edition",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
