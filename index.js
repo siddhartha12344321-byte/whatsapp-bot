@@ -223,14 +223,43 @@ async function generateQuizFromPdfBuffer({ pdfBuffer, topic = 'General', qty = 1
     const data = JSON.parse(jsonMatch[0]);
     let questions = data.quizzes || data.questions;
     return questions.map(q => {
-        let cIndex = typeof q.correctAnswer === 'string' ? q.options.indexOf(q.correctAnswer) : q.correctAnswer;
-        if (cIndex === -1) cIndex = 0;
-        return {
-            question: q.questionText || q.question,
-            options: q.options,
-            correct_index: cIndex,
-            answer_explanation: q.explanation || q.answer_explanation
-        };
+        return questions.map(q => {
+            let options = q.options || [];
+            if (options.length < 2) options = ["True", "False"]; // Safety
+
+            let cIndex = -1;
+
+            // 1. Try Direct Number Number
+            if (typeof q.correctAnswer === 'number') {
+                cIndex = q.correctAnswer;
+            }
+
+            // 2. Try Exact Text Match
+            if (cIndex === -1 && typeof q.correctAnswer === 'string') {
+                cIndex = options.findIndex(opt => opt.trim() === q.correctAnswer.trim());
+            }
+
+            // 3. Try "Option Letter" Match (e.g. "A" matches "A. Apple")
+            if (cIndex === -1 && typeof q.correctAnswer === 'string' && q.correctAnswer.length === 1) {
+                const letter = q.correctAnswer.toUpperCase(); // "A"
+                cIndex = letter.charCodeAt(0) - 65; // 0 for A, 1 for B
+            }
+
+            // 4. Fallback: Fuzzy Text Match
+            if (cIndex === -1 && typeof q.correctAnswer === 'string') {
+                cIndex = options.findIndex(opt => opt.toLowerCase().includes(q.correctAnswer.toLowerCase()));
+            }
+
+            // 5. Hard Fallback
+            if (cIndex < 0 || cIndex >= options.length) cIndex = 0;
+
+            return {
+                question: q.questionText || q.question || "Question?",
+                options: options,
+                correct_index: cIndex,
+                answer_explanation: q.explanation || q.answer_explanation || "Correct Answer."
+            };
+        }).slice(0, qty);
     }).slice(0, qty);
 }
 
@@ -324,6 +353,7 @@ async function startClient() {
 
 // --- 9. VOTE HANDLER ---
 // --- 9. VOTE HANDLER (CRITICAL FIX) ---
+// --- 9. VOTE HANDLER (CRITICAL FIX) ---
 async function handleVote(vote) {
     try {
         const msgId = vote.parentMessage.id.id;
@@ -352,13 +382,19 @@ async function handleVote(vote) {
             const currentQ = session.questions[session.index];
             if (!currentQ || !currentQ.options) return;
 
-            // 🔍 ROBUST COMPARISON LOGIC
+            // 🔍 ULTRA-ROBUST COMPARISON LOGIC
             // Normalize: Trim + Lowercase
             const normalize = (str) => (str ? String(str).trim().toLowerCase() : "");
             const correctText = normalize(currentQ.options[correctIndex]);
 
-            // Check all selected options (Whatsapp allows multi-select in some versions, though we force single)
-            const isCorrect = vote.selectedOptions.some(opt => normalize(opt.name) === correctText);
+            // Check all selected options
+            // "Different Angle": Does the vote CONTAIN the answer OR does answer CONTAIN vote?
+            const isCorrect = vote.selectedOptions.some(opt => {
+                const voteText = normalize(opt.name);
+                return voteText === correctText ||
+                    (voteText.length > 2 && correctText.includes(voteText)) ||
+                    (correctText.length > 2 && voteText.includes(correctText));
+            });
 
             console.log(`🗳️ Vote: ${voterId} | Selected: ${JSON.stringify(vote.selectedOptions.map(o => o.name))} | Expected: ${correctText} | Correct? ${isCorrect}`);
 
@@ -435,7 +471,15 @@ async function runQuizStep(chat, chatId) {
     const q = session.questions[session.index];
     const poll = new Poll(`Q${session.index + 1}: ${q.question}`, q.options, { allowMultipleAnswers: false });
     const sentMsg = await chat.sendMessage(poll);
-    activePolls.set(sentMsg.id.id, { correctIndex: q.correct_index, chatId, questionIndex: session.index });
+
+    // 🧠 DEEP MEMORY: Store the EXACT options we just sent. 
+    // This ensures that even if session changes, we know what THIS poll was about.
+    activePolls.set(sentMsg.id.id, {
+        correctIndex: q.correct_index,
+        chatId,
+        questionIndex: session.index,
+        originalOptions: q.options // Critical for "Deep Reading"
+    });
 
     setTimeout(async () => {
         if (!quizSessions.has(chatId)) return;
@@ -630,13 +674,15 @@ async function handleMessage(msg) {
             if (media.mimetype === 'application/pdf') {
                 pdfBuffer = Buffer.from(media.data, 'base64');
                 mediaPart = { inlineData: { data: media.data, mimeType: media.mimetype } };
+            } else if (media.mimetype === 'text/plain') {
+                // 📄 TEXT FILE SUPPORT (Chat Exports)
+                pdfBuffer = Buffer.from(media.data, 'base64'); // We reuse pdfBuffer var for simplicity, treating it as a raw doc
+                mediaPart = { inlineData: { data: media.data, mimeType: 'text/plain' } };
             } else if (media.mimetype.startsWith('image/')) {
                 mediaPart = { inlineData: { data: media.data, mimeType: media.mimetype } };
             } else if (media.mimetype.startsWith('audio/')) {
                 // 🎤 LEVEL 5: VOICE MODE (LISTENING)
-                // We treat audio as "inlineData" for Gemini to hear.
                 mediaPart = { inlineData: { data: media.data, mimeType: media.mimetype } };
-                // If there is no text prompt with the audio, we add a default one.
                 if (!prompt) prompt = "Listen to this audio and reply to the user concisely.";
             }
         }
@@ -665,14 +711,23 @@ async function handleMessage(msg) {
         }
     }
 
-    // PDF MOCK TEST / LEARNING LOGIC
+    // PDF / TEXT LEARNING LOGIC
     if (pdfBuffer) {
         // A. LEARNING MODE (Ingest to RAG)
         if (prompt.toLowerCase().includes("learn") || prompt.toLowerCase().includes("save") || prompt.toLowerCase().includes("read")) {
             await msg.reply(`🧠 Reading & Memorizing Document...`);
             try {
-                const data = await pdfParse(pdfBuffer);
-                await upsertToPinecone(data.text, "UserUpload_" + Date.now());
+                let text = "";
+                if (mediaPart && mediaPart.inlineData.mimeType === 'text/plain') {
+                    text = pdfBuffer.toString('utf-8'); // Raw text from Chat Export
+                } else {
+                    const data = await pdfParse(pdfBuffer); // PDF OCR
+                    text = data.text;
+                }
+
+                if (!text || text.length < 10) throw new Error("File is empty or unreadable.");
+
+                await upsertToPinecone(text, "UserUpload_" + Date.now());
                 await msg.reply("✅ Memorized! I can now recall this information.");
             } catch (e) {
                 console.error(e);
