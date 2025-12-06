@@ -9,41 +9,19 @@ const chromium = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
 const pdfParse = require('pdf-parse');
 
-// --- 1. WEB SERVER & STATE TRACKING ---
+// --- 1. WEB SERVER ---
 const app = express();
 const port = process.env.PORT || 3000;
-
-// STATE VARIABLES
 let qrCodeData = "";
-let isSessionActive = false; // <--- THE TRUTH TELLER
 
 app.get('/', (req, res) => res.send('Bot is Alive! <a href="/qr">Scan QR Code</a>'));
-
 app.get('/qr', async (req, res) => {
-    // 1. If actually connected
-    if (isSessionActive) {
-        return res.send('<h2 style="color:green;">✅ Bot is Successfully Connected!</h2>');
-    }
-    
-    // 2. If QR is ready
-    if (qrCodeData) {
-        try {
-            const url = await QRCodeImage.toDataURL(qrCodeData);
-            return res.send(`
-                <div style="display:flex;flex-direction:column;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;">
-                    <h1>📱 Scan This QR</h1>
-                    <img src="${url}" style="border:5px solid #000; width:300px; border-radius:10px;">
-                    <p>Open WhatsApp > Linked Devices > Link a Device</p>
-                    <p style="color:red; font-size:small;">(If this doesn't work, clear cache & redeploy)</p>
-                </div>
-            `);
-        } catch { return res.send('Error generating QR image.'); }
-    }
-
-    // 3. If waiting for QR (The "Loading" State)
-    return res.send('<h2 style="color:orange;">⏳ Initializing... Please Reload in 10 seconds.</h2>');
+    if (!qrCodeData) return res.send('<h2 style="color:orange;">⏳ Generating QR... Check back in 10s or Check Logs.</h2>');
+    try {
+        const url = await QRCodeImage.toDataURL(qrCodeData);
+        res.send(`<div style="display:flex;flex-direction:column;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;"><h1>📱 Scan This QR</h1><img src="${url}" style="border:5px solid #000; width:300px; border-radius:10px;"></div>`);
+    } catch { res.send('Error generating QR image.'); }
 });
-
 app.listen(port, () => console.log(`Server running on port ${port}`));
 
 // --- 2. PERSISTENCE ---
@@ -87,7 +65,7 @@ function checkRateLimit(chatId) {
     const now = Date.now();
     if (!rateLimit.has(chatId)) rateLimit.set(chatId, []);
     const timestamps = rateLimit.get(chatId).filter(t => now - t < 60000);
-    if (timestamps.length >= 25) return false;
+    if (timestamps.length >= 20) return false;
     timestamps.push(now);
     rateLimit.set(chatId, timestamps);
     return true;
@@ -95,14 +73,7 @@ function checkRateLimit(chatId) {
 
 // --- 6. THE BRAIN ---
 const MODEL_NAME = "gemini-2.0-flash";
-const SYSTEM_INSTRUCTION = `
-You are **Siddhartha's AI Assistant**.
-**MODE 1: QUIZ GENERATOR**
-- If user asks for "Quiz", "Test", "MCQ" -> OUTPUT STRICT JSON ONLY.
-- Format: { "type": "quiz_batch", "topic": "Subject", "quizzes": [{ "question": "...", "options": ["A","B","C","D"], "correct_index": 0, "answer_explanation": "..." }] }
-**MODE 2: GENERAL**
-- Answer text/image questions normally.
-`;
+const SYSTEM_INSTRUCTION = `You are Siddhartha's AI. QUIZ PROTOCOL: If user asks for Quiz/MCQ -> OUTPUT STRICT JSON: {"type": "quiz_batch", "topic": "Subject", "quizzes": [{"question": "...", "options": ["..."], "correct_index": 0, "answer_explanation": "..."}]}`;
 
 function getModel() {
     return genAI.getGenerativeModel({ 
@@ -122,36 +93,23 @@ async function extractTextFromPDF(buffer) {
     try {
         const parsed = await pdfParse(buffer);
         return parsed.text || "";
-    } catch (e) {
-        console.error("PDF parse error:", e);
-        return "";
-    }
+    } catch (e) { return ""; }
 }
 
-async function generateQuizFromPdfBuffer({ pdfBuffer, topic='General Knowledge', qty=10, difficulty='medium' }) {
+async function generateQuizFromPdfBuffer({ pdfBuffer, topic='General', qty=10, difficulty='medium' }) {
     const text = await extractTextFromPDF(pdfBuffer);
-    if (!text || text.trim().length < 50) throw new Error("PDF empty or unreadable.");
+    if (!text || text.trim().length < 50) throw new Error("PDF empty");
 
-    const finalPrompt = `
-    Generate a quiz from this PDF text.
-    TOPIC: "${topic}" (Focus strictly on this).
-    DIFFICULTY: ${difficulty}
-    QUANTITY: Exactly ${qty} questions.
-    PDF TEXT (Partial): """${text.slice(0, 30000)}"""
-    OUTPUT: STRICT JSON ONLY. Format:
-    { "type": "quiz_batch", "topic": "${topic}", "quizzes": [ { "question": "...", "options":["A","B","C","D"], "correct_index": 0, "answer_explanation": "..." } ] }
-    `;
+    const finalPrompt = `GENERATE QUIZ JSON. Topic: ${topic}. Difficulty: ${difficulty}. Qty: ${qty}. Source: """${text.slice(0, 30000)}""" Output Format: { "type": "quiz_batch", "topic": "${topic}", "quizzes": [ { "question": "...", "options":["A","B","C","D"], "correct_index": 0, "answer_explanation": "..." } ] }`;
 
     const model = getModel();
     const result = await model.generateContent(finalPrompt);
     const responseText = result.response.text();
-    
     const jsonMatch = responseText.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error("No JSON found");
     
     const data = JSON.parse(jsonMatch[0]);
     let questions = data.quizzes || data.questions;
-    
     return questions.map(q => {
         let cIndex = typeof q.correctAnswer === 'string' ? q.options.indexOf(q.correctAnswer) : q.correctAnswer;
         if (cIndex === -1) cIndex = 0;
@@ -164,49 +122,60 @@ async function generateQuizFromPdfBuffer({ pdfBuffer, topic='General Knowledge',
     }).slice(0, qty);
 }
 
-// --- 8. WHATSAPP CLIENT (SPARTICUZ FIXED) ---
+// --- 8. WHATSAPP CLIENT (FORCE NEW QR) ---
 let client;
 
 async function startClient() {
     console.log('🔄 Initializing Client...');
-    
-    // Reset state on restart
-    isSessionActive = false;
     qrCodeData = "";
 
+    // 🔥 FORCE DELETE SESSION - This guarantees a new QR every deploy 🔥
     try {
-        // Force Headless for Render
+        console.log('🧹 Clearing old session to ensure fresh QR...');
+        fs.rmSync('.wwebjs_auth', { recursive: true, force: true });
+        console.log('✅ Session cleared.');
+    } catch (e) {
+        console.log('ℹ️ No session to clear.');
+    }
+
+    try {
         chromium.setHeadlessMode = true;
         chromium.setGraphicsMode = false;
 
         client = new Client({
-            authStrategy: new LocalAuth(),
+            authStrategy: new LocalAuth(), // Will create a new session now
             puppeteer: {
-                args: [...chromium.args, '--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
+                args: [
+                    ...chromium.args,
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-gpu',
+                    '--disable-dev-shm-usage',
+                    '--no-first-run',
+                    '--single-process'
+                ],
                 defaultViewport: chromium.defaultViewport,
                 executablePath: await chromium.executablePath(),
                 headless: chromium.headless,
-                ignoreHTTPSErrors: true
+                ignoreHTTPSErrors: true,
+                timeout: 120000 
             }
         });
 
         client.on('qr', (qr) => {
-            console.log('⚡ NEW QR RECEIVED');
+            console.log('⚡ NEW QR RECEIVED - Scan this!');
             qrCodeData = qr;
-            isSessionActive = false; // Ensure we know we aren't connected
             qrcode.generate(qr, { small: true });
         });
 
         client.on('ready', () => {
             console.log('✅ Siddhartha\'s AI is Online!');
             qrCodeData = "";
-            isSessionActive = true; // NOW we are connected
         });
         
         client.on('disconnected', (reason) => {
             console.log('❌ Disconnected:', reason);
-            isSessionActive = false;
-            // Allow Render to restart the process naturally
+            process.exit(1); 
         });
 
         client.on('vote_update', handleVote);
@@ -214,7 +183,8 @@ async function startClient() {
 
         await client.initialize();
     } catch (err) {
-        console.error('❌ Fatal Client Error:', err.message);
+        console.error('❌ Fatal Error:', err.message);
+        process.exit(1);
     }
 }
 
@@ -226,12 +196,11 @@ async function handleVote(vote) {
             const session = quizSessions.get(chatId);
             const voterId = vote.voter;
             
-            if (questionIndex !== session.index) return; 
-
+            if (questionIndex !== session.index) return;
             if (!session.scores.has(voterId)) session.scores.set(voterId, 0);
             
             const uniqueVoteKey = `${session.index}_${voterId}`;
-            if (session.creditedVotes.has(uniqueVoteKey)) return; 
+            if (session.creditedVotes.has(uniqueVoteKey)) return;
 
             const correctOptionText = session.questions[session.index].options[correctIndex];
             const isCorrect = vote.selectedOptions.some(opt => opt.name.trim() === correctOptionText.trim());
@@ -296,15 +265,12 @@ async function runQuizStep(chat, chatId) {
     const q = session.questions[session.index];
     const poll = new Poll(`Q${session.index+1}: ${q.question}`, q.options, { allowMultipleAnswers: false });
     const sentMsg = await chat.sendMessage(poll);
-    
     activePolls.set(sentMsg.id.id, { correctIndex: q.correct_index, chatId, questionIndex: session.index });
 
     setTimeout(async () => {
         if (!quizSessions.has(chatId)) return;
         const correctOpt = q.options[q.correct_index];
-        
         await sentMsg.reply(`⏰ **Time's Up!**\n✅ **Answer:** ${correctOpt}`);
-        
         activePolls.delete(sentMsg.id.id);
         session.index++;
         setTimeout(() => { runQuizStep(chat, chatId); }, 3000);
@@ -374,7 +340,6 @@ async function handleMessage(msg) {
 
     if (prompt.toLowerCase().includes("easy")) difficulty = "easy";
     if (prompt.toLowerCase().includes("hard")) difficulty = "hard";
-    
     const topicMatch = prompt.match(/quiz\s+on\s+(.+?)(?:\s|$)/i);
     if (topicMatch) topic = topicMatch[1].trim();
 
