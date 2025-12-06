@@ -15,7 +15,7 @@ let qrCodeData = "";
 
 app.get('/', (req, res) => res.send('Bot is Alive! <a href="/qr">Scan QR Code</a>'));
 app.get('/qr', async (req, res) => {
-    if (!qrCodeData) return res.send('<h2>Bot is connected! No QR needed.</h2>');
+    if (!qrCodeData) return res.send('<h2>Bot is starting... Refresh in 10s.</h2>');
     try {
         const url = await QRCodeImage.toDataURL(qrCodeData);
         res.send(`<div style="display:flex;flex-direction:column;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;"><h1>📱 Scan This QR</h1><img src="${url}" style="border:5px solid #000; width:300px; border-radius:10px;"></div>`);
@@ -87,17 +87,13 @@ function getModel() {
     });
 }
 
-// --- 7. WHATSAPP CLIENT (SPARTICUZ CONFIGURATION) ---
+// --- 7. WHATSAPP CLIENT (AUTO-HEALING) ---
 let client;
 
 async function startClient() {
-    console.log('🔄 Initializing Client with Sparticuz Chromium...');
+    console.log('🔄 Initializing Client...');
     
     try {
-        // Configure Sparticuz Chromium
-        chromium.setHeadlessMode = true;
-        chromium.setGraphicsMode = false;
-
         client = new Client({
             authStrategy: new LocalAuth(),
             puppeteer: {
@@ -106,12 +102,15 @@ async function startClient() {
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
                     '--disable-gpu',
-                    '--disable-dev-shm-usage'
+                    '--disable-dev-shm-usage',
+                    '--no-first-run',
+                    '--no-zygote'
                 ],
                 defaultViewport: chromium.defaultViewport,
-                executablePath: await chromium.executablePath(), // <--- THE MAGIC FIX
+                executablePath: await chromium.executablePath(), 
                 headless: chromium.headless,
-                ignoreHTTPSErrors: true
+                ignoreHTTPSErrors: true,
+                timeout: 60000 // Increase timeout
             }
         });
 
@@ -128,7 +127,7 @@ async function startClient() {
         
         client.on('disconnected', (reason) => {
             console.log('❌ Disconnected:', reason);
-            process.exit(1); 
+            // Don't exit immediately, let it try to clean up
         });
 
         // HANDLERS
@@ -139,7 +138,19 @@ async function startClient() {
         
     } catch (err) {
         console.error('❌ Fatal Client Error:', err.message);
-        // Do not exit immediately, let the server stay alive
+        
+        // --- 🚑 AUTO-WIPE LOGIC ---
+        // If session closed or protocol error, wipe the auth folder to reset
+        if (err.message.includes('Session closed') || err.message.includes('Protocol error')) {
+            console.log('🧹 Corrupted Session Detected. Wiping auth data...');
+            try {
+                fs.rmSync('.wwebjs_auth', { recursive: true, force: true });
+                console.log('✨ Auth data cleared. Restarting process...');
+                process.exit(1); // Render will restart us fresh
+            } catch (cleanupErr) {
+                console.error('Failed to cleanup:', cleanupErr);
+            }
+        }
     }
 }
 
