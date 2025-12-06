@@ -10,6 +10,7 @@ const puppeteer = require('puppeteer-core');
 const pdfParse = require('pdf-parse');
 const mongoose = require('mongoose');
 const { Pinecone } = require('@pinecone-database/pinecone');
+const googleTTS = require('google-tts-api'); // 🗣️ Voice Mode
 
 // 🌲 PINECONE CONNECTION (VECTOR DB)
 const pc = new Pinecone({ apiKey: process.env.PINECONE_API_KEY || 'pcsk_4YGs7G_FB4bw1RbEejhHeiwEeL8wrU2vS1vQfFS2TcdhxJjsrehCHMyeFtHw4cHJkWPZvc' });
@@ -591,6 +592,12 @@ async function handleMessage(msg) {
                 mediaPart = { inlineData: { data: media.data, mimeType: media.mimetype } };
             } else if (media.mimetype.startsWith('image/')) {
                 mediaPart = { inlineData: { data: media.data, mimeType: media.mimetype } };
+            } else if (media.mimetype.startsWith('audio/')) {
+                // 🎤 LEVEL 5: VOICE MODE (LISTENING)
+                // We treat audio as "inlineData" for Gemini to hear.
+                mediaPart = { inlineData: { data: media.data, mimeType: media.mimetype } };
+                // If there is no text prompt with the audio, we add a default one.
+                if (!prompt) prompt = "Listen to this audio and reply to the user concisely.";
             }
         }
     }
@@ -730,7 +737,25 @@ async function handleMessage(msg) {
                 }
             } catch (e) { await msg.reply("⚠️ AI formatting error."); }
         } else if (!isQuiz) {
-            await msg.reply(responseText);
+            // 🗣️ LEVEL 5: VOICE MODE (SPEAKING)
+            // If the user sent an audio message (PTT/Audio), we reply with Audio.
+            const isVoiceMessage = msg.type === 'ptt' || msg.type === 'audio';
+
+            if (isVoiceMessage) {
+                try {
+                    // Convert AI text to Audio (MP3)
+                    const ttsUrl = googleTTS.getAudioUrl(responseText, { lang: 'en', slow: false });
+                    const audioMedia = await MessageMedia.fromUrl(ttsUrl, { unsafeMime: true });
+                    await client.sendMessage(msg.from, audioMedia, { sendAudioAsVoice: true });
+                    // We also send text for clarity (Optional, but good UX)
+                    // await msg.reply(responseText); 
+                } catch (e) {
+                    console.error("TTS Error:", e);
+                    await msg.reply(responseText); // Fallback to text
+                }
+            } else {
+                await msg.reply(responseText);
+            }
         }
     } catch (err) {
         if (err.message.includes("429")) rotateKey();
