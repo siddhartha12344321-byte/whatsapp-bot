@@ -362,4 +362,4 @@ client.on('message', async msg => {
                 }
 
                 // SMART JSON PARSER
-                const cleanedResponse
+                const cleanedResponse = responseText.replace(/
