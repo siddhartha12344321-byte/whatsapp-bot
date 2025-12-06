@@ -1,20 +1,21 @@
 {
   "name": "whatsapp-gemini-bot",
-  "version": "11.0.0",
-  "description": "WhatsApp Bot - Auto Healing",
+  "version": "12.0.0",
+  "description": "WhatsApp Bot - Ultimate Edition",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "whatsapp-web.js": "^1.23.0",
-    "puppeteer-core": "^21.5.0",
-    "@sparticuz/chromium": "^119.0.0",
+    "puppeteer-core": "^22.6.0",
+    "@sparticuz/chromium": "^123.0.0",
     "qrcode-terminal": "^0.12.0",
     "qrcode": "^1.5.3",
     "@google/generative-ai": "^0.21.0",
     "express": "^4.19.2",
-    "sanitize-html": "^2.11.0"
+    "sanitize-html": "^2.11.0",
+    "pdf-parse": "^1.1.1"
   },
   "engines": {
     "node": ">=18.0.0"
