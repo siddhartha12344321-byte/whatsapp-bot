@@ -15,7 +15,8 @@ let qrCodeData = "";
 
 app.get('/', (req, res) => res.send('Bot is Alive! <a href="/qr">Scan QR Code</a>'));
 app.get('/qr', async (req, res) => {
-    if (!qrCodeData) return res.send('<h2>Bot is starting... Refresh in 10s.</h2>');
+    // If connected, show success message
+    if (!qrCodeData) return res.send('<h2>✅ Bot is Connected! No QR needed.</h2>');
     try {
         const url = await QRCodeImage.toDataURL(qrCodeData);
         res.send(`<div style="display:flex;flex-direction:column;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;"><h1>📱 Scan This QR</h1><img src="${url}" style="border:5px solid #000; width:300px; border-radius:10px;"></div>`);
@@ -87,47 +88,65 @@ function getModel() {
     });
 }
 
-// --- 7. WHATSAPP CLIENT (AUTO-HEALING) ---
+// --- 7. WHATSAPP CLIENT (LOW MEMORY MODE) ---
 let client;
 
 async function startClient() {
     console.log('🔄 Initializing Client...');
     
     try {
+        // Tweak Sparticuz for Max Performance
+        chromium.setHeadlessMode = true;
+        chromium.setGraphicsMode = false;
+
         client = new Client({
-            authStrategy: new LocalAuth(),
+            authStrategy: new LocalAuth({
+                clientId: "client-one", // Explicit ID helps persistence
+                dataPath: "./.wwebjs_auth"
+            }),
             puppeteer: {
                 args: [
                     ...chromium.args,
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
-                    '--disable-gpu',
-                    '--disable-dev-shm-usage',
+                    '--disable-dev-shm-usage', // Critical for Docker/Render
+                    '--disable-accelerated-2d-canvas',
                     '--no-first-run',
-                    '--no-zygote'
+                    '--no-zygote',
+                    '--single-process', 
+                    '--disable-gpu'
                 ],
                 defaultViewport: chromium.defaultViewport,
-                executablePath: await chromium.executablePath(), 
+                executablePath: await chromium.executablePath(),
                 headless: chromium.headless,
                 ignoreHTTPSErrors: true,
-                timeout: 60000 // Increase timeout
+                timeout: 0 // No timeout
             }
         });
 
         client.on('qr', (qr) => {
             console.log('⚡ NEW QR RECEIVED');
-            qrCodeData = qr;
-            qrcode.generate(qr, { small: true });
+            qrCodeData = qr; // Save to variable for Web View
+            qrcode.generate(qr, { small: true }); // Print to logs
         });
 
         client.on('ready', () => {
             console.log('✅ Siddhartha\'s AI is Online!');
-            qrCodeData = "";
+            qrCodeData = ""; // Clear QR variable
         });
         
+        // Debugging Events
+        client.on('authenticated', () => {
+            console.log('🔑 Authenticated successfully!');
+        });
+
+        client.on('auth_failure', (msg) => {
+            console.error('❌ Auth Failure:', msg);
+        });
+
         client.on('disconnected', (reason) => {
             console.log('❌ Disconnected:', reason);
-            // Don't exit immediately, let it try to clean up
+            // Do not exit immediately, let Render handle restart naturally if needed
         });
 
         // HANDLERS
@@ -138,19 +157,6 @@ async function startClient() {
         
     } catch (err) {
         console.error('❌ Fatal Client Error:', err.message);
-        
-        // --- 🚑 AUTO-WIPE LOGIC ---
-        // If session closed or protocol error, wipe the auth folder to reset
-        if (err.message.includes('Session closed') || err.message.includes('Protocol error')) {
-            console.log('🧹 Corrupted Session Detected. Wiping auth data...');
-            try {
-                fs.rmSync('.wwebjs_auth', { recursive: true, force: true });
-                console.log('✨ Auth data cleared. Restarting process...');
-                process.exit(1); // Render will restart us fresh
-            } catch (cleanupErr) {
-                console.error('Failed to cleanup:', cleanupErr);
-            }
-        }
     }
 }
 
