@@ -7,7 +7,7 @@ const fs = require('fs');
 const sanitizeHtml = require('sanitize-html');
 const chromium = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
-const pdfParse = require('pdf-parse');
+const pdfParse = require('pdf-parse'); // Kept but unused
 
 // --- 1. WEB SERVER ---
 const app = express();
@@ -88,25 +88,24 @@ function getModel() {
     });
 }
 
-// --- 7. PDF HELPER ---
-async function extractTextFromPDF(buffer) {
-    try {
-        const parsed = await pdfParse(buffer);
-        return parsed.text || "";
-    } catch (e) { return ""; }
-}
-
+// --- 7. PDF HELPER (GEMINI VISION OCR) ---
 async function generateQuizFromPdfBuffer({ pdfBuffer, topic = 'General', qty = 10, difficulty = 'medium' }) {
-    const text = await extractTextFromPDF(pdfBuffer);
-    if (!text || text.trim().length < 50) throw new Error("PDF empty");
+    if (!pdfBuffer || pdfBuffer.length === 0) throw new Error("PDF Buffer empty");
 
-    const finalPrompt = `GENERATE QUIZ JSON. Topic: ${topic}. Difficulty: ${difficulty}. Qty: ${qty}. Source: """${text.slice(0, 30000)}""" Output Format: { "type": "quiz_batch", "topic": "${topic}", "quizzes": [ { "question": "...", "options":["A","B","C","D"], "correct_index": 0, "answer_explanation": "..." } ] }`;
+    // We no longer use pdf-parse. We send the PDF directly to Gemini (Multimodal).
+
+    const finalPrompt = `GENERATE QUIZ JSON. Topic: ${topic}. Difficulty: ${difficulty}. Qty: ${qty}. Source is the attached PDF. Extract questions from it. Output STRICT JSON: { "type": "quiz_batch", "topic": "${topic}", "quizzes": [ { "question": "...", "options":["A","B","C","D"], "correct_index": 0, "answer_explanation": "..." } ] }`;
 
     const model = getModel();
-    const result = await model.generateContent(finalPrompt);
+    const contentParts = [
+        { text: finalPrompt },
+        { inlineData: { data: pdfBuffer.toString('base64'), mimeType: 'application/pdf' } }
+    ];
+
+    const result = await model.generateContent(contentParts);
     const responseText = result.response.text();
     const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("No JSON found");
+    if (!jsonMatch) throw new Error("No JSON found in AI response");
 
     const data = JSON.parse(jsonMatch[0]);
     let questions = data.quizzes || data.questions;
@@ -129,14 +128,20 @@ async function startClient() {
     console.log('🔄 Initializing Client...');
     qrCodeData = "";
 
-    // 🔥 FORCE DELETE SESSION - This guarantees a new QR every deploy 🔥
-    try {
-        console.log('🧹 Clearing old session to ensure fresh QR...');
-        fs.rmSync('.wwebjs_auth', { recursive: true, force: true });
-        console.log('✅ Session cleared.');
-    } catch (e) {
-        console.log('ℹ️ No session to clear.');
-    }
+    // Heartbeat to keep active logging (helpful for Render logs)
+    setInterval(() => {
+        console.log('💓 Heartbeat - Bot is alive');
+    }, 5 * 60 * 1000); // Every 5 minutes
+
+    // 🛑 SESSION DELETION REMOVED FOR PERSISTENCE 🛑
+    // The line below is commented out to allow the bot to remember the session.
+    // try {
+    //     console.log('🧹 Clearing old session to ensure fresh QR...');
+    //     fs.rmSync('.wwebjs_auth', { recursive: true, force: true });
+    //     console.log('✅ Session cleared.');
+    // } catch (e) {
+    //     console.log('ℹ️ No session to clear.');
+    // }
 
     try {
         let puppetConfig;
@@ -145,7 +150,7 @@ async function startClient() {
             console.log(`🖥️ Windows detected. Using Local Brave: ${bravePath}`);
             puppetConfig = {
                 executablePath: bravePath,
-                headless: false, // Headless: false is more stable for local WhatsApp Web
+                headless: false,
                 args: ['--no-sandbox', '--disable-setuid-sandbox']
             };
         } else {
@@ -174,7 +179,7 @@ async function startClient() {
         }
 
         client = new Client({
-            authStrategy: new LocalAuth(), // Will create a new session now
+            authStrategy: new LocalAuth(),
             puppeteer: puppetConfig
         });
 
@@ -191,7 +196,7 @@ async function startClient() {
 
         client.on('disconnected', (reason) => {
             console.log('❌ Disconnected:', reason);
-            process.exit(1);
+            // process.exit(1); 
         });
 
         client.on('vote_update', handleVote);
@@ -206,26 +211,44 @@ async function startClient() {
 
 // --- 9. VOTE HANDLER ---
 async function handleVote(vote) {
-    if (activePolls.has(vote.parentMessage.id.id)) {
+    try {
+        if (!activePolls.has(vote.parentMessage.id.id)) return;
         const { correctIndex, chatId, questionIndex } = activePolls.get(vote.parentMessage.id.id);
-        if (quizSessions.has(chatId)) {
-            const session = quizSessions.get(chatId);
-            const voterId = vote.voter;
 
-            if (questionIndex !== session.index) return;
-            if (!session.scores.has(voterId)) session.scores.set(voterId, 0);
+        if (!quizSessions.has(chatId)) return;
+        const session = quizSessions.get(chatId);
 
-            const uniqueVoteKey = `${session.index}_${voterId}`;
-            if (session.creditedVotes.has(uniqueVoteKey)) return;
+        // Safety: Ensure session is still on the same question
+        if (questionIndex !== session.index) return;
 
-            const correctOptionText = session.questions[session.index].options[correctIndex];
-            const isCorrect = vote.selectedOptions.some(opt => opt.name.trim() === correctOptionText.trim());
+        const voterId = vote.voter;
+        const uniqueVoteKey = `${session.index}_${voterId}`;
+
+        // 🛡️ Prevent Duplicate Processing
+        if (session.creditedVotes.has(uniqueVoteKey)) return;
+        session.creditedVotes.add(uniqueVoteKey); // Mark as voted immediately
+
+        if (!session.scores.has(voterId)) session.scores.set(voterId, 0);
+
+        // 🛡️ Crash-Proof Answer Check
+        try {
+            const currentQ = session.questions[session.index];
+            if (!currentQ || !currentQ.options) return;
+
+            // Safe trim helper
+            const safeTrim = (str) => (typeof str === 'string' ? str.trim() : "");
+
+            const correctOptionText = safeTrim(currentQ.options[correctIndex]);
+            const isCorrect = vote.selectedOptions.some(opt => safeTrim(opt.name) === correctOptionText);
 
             if (isCorrect) {
                 session.scores.set(voterId, session.scores.get(voterId) + 1);
-                session.creditedVotes.add(uniqueVoteKey);
             }
+        } catch (innerErr) {
+            console.error("⚠️ Error calculating score (vote counted as attempt):", innerErr.message);
         }
+    } catch (err) {
+        console.error("❌ Fatal Vote Error (Safely Ignored):", err.message);
     }
 }
 
@@ -327,9 +350,20 @@ async function handleTextAsVoteFallback(msg, chat, prompt) {
 // --- 13. MAIN HANDLER ---
 async function handleMessage(msg) {
     const chat = await msg.getChat();
-    if (chat.isGroup && !msg.body.includes("@")) return;
 
+    // 🛡️ INTERACTION LOGIC
+    // 1. Groups: ONLY respond if mentioned (@Bot)
+    // 2. DMs: Respond to everything
+    if (chat.isGroup) {
+        const mentions = await msg.getMentions();
+        const isMentioned = mentions.some(c => c.isMe);
+        if (!isMentioned) return;
+    }
+
+    // Clean prompt: remove mentions to avoid confusing the AI
     let prompt = sanitizeHtml(msg.body.replace(/@\S+/g, "").trim());
+
+    // Rate Limit Check
     if (!checkRateLimit(chat.id._serialized)) return;
 
     if (await handleTextAsVoteFallback(msg, chat, prompt)) return;
