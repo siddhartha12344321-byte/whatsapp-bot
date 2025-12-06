@@ -7,7 +7,26 @@ const fs = require('fs');
 const sanitizeHtml = require('sanitize-html');
 const chromium = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
-const pdfParse = require('pdf-parse'); // Kept but unused
+const pdfParse = require('pdf-parse');
+const mongoose = require('mongoose');
+
+// 🔌 MONGODB CONNECTION
+// NOTE: Ideally, use process.env.MONGODB_URI. We add the fallback for immediate usage as requested.
+const MONGODB_URI = process.env.MONGODB_URI || "mongodb+srv://amurag12344321_db_user:78mbO8WPw69AeTpt@siddharthawhatsappbot.wfbdgjf.mongodb.net/?appName=SiddharthaWhatsappBot";
+
+mongoose.connect(MONGODB_URI)
+    .then(() => console.log('🍃 MongoDB Connected'))
+    .catch(err => console.error('❌ MongoDB Connection Error:', err));
+
+// 📝 USER SCHEMA
+const userSchema = new mongoose.Schema({
+    userId: { type: String, required: true, unique: true },
+    name: String,
+    highScore: { type: Number, default: 0 },
+    lastTopic: { type: String, default: 'General' },
+    joined: { type: Date, default: Date.now }
+});
+const User = mongoose.model('User', userSchema);
 
 // --- 1. WEB SERVER ---
 const app = express();
@@ -37,11 +56,11 @@ function rotateKey() {
     genAI = new GoogleGenerativeAI(rawKeys[currentKeyIndex]);
 }
 
-// --- 4. MEMORY & USER DATABASE ---
+// --- 4. MEMORY & USER DATABASE (MONGODB) ---
 const HISTORY_FILE = 'chatHistory.json';
-const USER_DB_FILE = 'user_db.json';
+// const USER_DB_FILE = 'user_db.json'; // Deprecated
 let chatHistory = new Map();
-let userDatabase = new Map();
+// let userDatabase = new Map(); // Deprecated
 
 function loadHistory() {
     if (fs.existsSync(HISTORY_FILE)) {
@@ -51,30 +70,34 @@ function loadHistory() {
 function saveHistory() {
     try { fs.writeFileSync(HISTORY_FILE, JSON.stringify(Object.fromEntries(chatHistory))); } catch (e) { }
 }
-function loadUserDatabase() {
-    if (fs.existsSync(USER_DB_FILE)) {
-        try { userDatabase = new Map(Object.entries(JSON.parse(fs.readFileSync(USER_DB_FILE)))); } catch (e) { }
+// function loadUserDatabase() ... Removed for MongoDB
+// function saveUserDatabase() ... Removed for MongoDB
+
+async function updateUserProfile(userId, name, topic, scoreToAdd = 0) {
+    try {
+        let user = await User.findOne({ userId });
+        if (!user) {
+            user = new User({ userId, name: name || 'Friend' });
+        }
+
+        if (name) user.name = name;
+        if (topic) user.lastTopic = topic;
+
+        if (scoreToAdd > 0) {
+            const currentScore = user.highScore || 0;
+            if (scoreToAdd > currentScore) user.highScore = scoreToAdd;
+        }
+
+        await user.save();
+        return user;
+    } catch (e) {
+        console.error("MongoDB Error:", e);
+        return { name: name || 'Friend', highScore: 0, lastTopic: topic || 'General' }; // Fallback
     }
-}
-function saveUserDatabase() {
-    try { fs.writeFileSync(USER_DB_FILE, JSON.stringify(Object.fromEntries(userDatabase))); } catch (e) { }
-}
-function updateUserProfile(userId, name, topic, scoreToAdd = 0) {
-    if (!userDatabase.has(userId)) userDatabase.set(userId, { name: name || 'Friend', highScore: 0, lastTopic: 'General', joined: Date.now() });
-    const profile = userDatabase.get(userId);
-    if (name) profile.name = name;
-    if (topic) profile.lastTopic = topic;
-    if (scoreToAdd > 0) {
-        if (!profile.score) profile.score = 0; // Legacy fix
-        profile.score += scoreToAdd;
-        if (scoreToAdd > profile.highScore) profile.highScore = scoreToAdd; // Simple high score logic (per session score usually)
-    }
-    saveUserDatabase();
-    return profile;
 }
 
 loadHistory();
-loadUserDatabase();
+// loadUserDatabase(); // No longer needed
 
 function updateHistory(chatId, role, text) {
     if (!chatHistory.has(chatId)) chatHistory.set(chatId, []);
