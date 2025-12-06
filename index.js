@@ -352,14 +352,30 @@ async function handleMessage(msg) {
     const chat = await msg.getChat();
 
     // 🛡️ INTERACTION LOGIC
-    // 1. Groups: ONLY respond if mentioned (@Bot)
+    // 1. Groups: Respond if MENTIONED (@Bot) OR if ACTIVE SESSION (Quiz Running)
     // 2. DMs: Respond to everything
     if (chat.isGroup) {
-        if (!msg.mentionedIds.includes(client.info.wid._serialized)) return;
+        const hasActiveSession = quizSessions.has(chat.id._serialized);
+        const isMentioned = msg.mentionedIds.includes(client.info.wid._serialized);
+
+        // If not directly addressed AND not in an active conversation/quiz, ignore.
+        if (!isMentioned && !hasActiveSession) return;
     }
 
     // Clean prompt: remove mentions to avoid confusing the AI
     let prompt = sanitizeHtml(msg.body.replace(/@\S+/g, "").trim());
+
+    // 🧠 HUMAN CONTEXT (REPLIES)
+    // If user replies to a message, the AI should know what they are replying to.
+    if (msg.hasQuotedMsg) {
+        try {
+            const quotedMsg = await msg.getQuotedMessage();
+            if (quotedMsg && quotedMsg.body) {
+                // Prepend context so AI understands "it", "that", "him", etc.
+                prompt = `[Context - Replying to: "${sanitizeHtml(quotedMsg.body)}"]\n${prompt}`;
+            }
+        } catch (e) { /* Ignore fetch error */ }
+    }
 
     // Rate Limit Check
     if (!checkRateLimit(chat.id._serialized)) return;
