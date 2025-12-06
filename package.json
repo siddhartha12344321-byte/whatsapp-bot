@@ -1,7 +1,7 @@
 {
   "name": "whatsapp-gemini-bot",
-  "version": "8.0.0",
-  "description": "Enterprise Grade WhatsApp Bot",
+  "version": "9.0.0",
+  "description": "Enterprise Grade WhatsApp Bot - Production Ready",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
