@@ -1,4 +1,4 @@
-const { Client, LocalAuth, Poll } = require('whatsapp-web.js');
+const { Client, LocalAuth, Poll, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const QRCodeImage = require('qrcode');
 const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generative-ai");
@@ -458,26 +458,84 @@ async function handleTextAsVoteFallback(msg, chat, prompt) {
     return true;
 }
 
+// --- 13. LEVEL 4: THE ARTIST & RESEARCHER ---
+async function handleImageGeneration(msg, prompt) {
+    await msg.reply("🎨 Drawing...");
+    try {
+        // Pollinations.ai (Free, No Key)
+        const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1024&height=1024&nologo=true`;
+        const media = await MessageMedia.fromUrl(imageUrl);
+        await msg.reply(media);
+    } catch (e) {
+        console.error("Image Gen Error:", e);
+        await msg.reply("❌ Failed to generate image.");
+    }
+}
+
+async function handleWebSearch(msg, query) {
+    if (!process.env.TAVILY_API_KEY) {
+        return await msg.reply("⚠️ Web Search requires TAVILY_API_KEY.");
+    }
+    await msg.reply("🕵️‍♂️ Searching the web...");
+    try {
+        const response = await fetch("https://api.tavily.com/search", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                api_key: process.env.TAVILY_API_KEY,
+                query: query,
+                search_depth: "basic",
+                include_answer: true,
+                max_results: 3
+            })
+        });
+        const data = await response.json();
+
+        let resultText = "";
+        if (data.answer) resultText += `📝 **Answer:** ${data.answer}\n\n`;
+        if (data.results && data.results.length > 0) {
+            resultText += "🔗 **Sources:**\n";
+            data.results.forEach(r => resultText += `- [${r.title}](${r.url})\n`);
+        }
+
+        await msg.reply(resultText || "❌ No results found.");
+        return resultText; // Return for Gemini context if needed
+    } catch (e) {
+        console.error("Search Error:", e);
+        await msg.reply("❌ Search failed.");
+    }
+    return null;
+}
+
 // --- 13. MAIN HANDLER ---
 async function handleMessage(msg) {
     const chat = await msg.getChat();
 
-    // 🛡️ INTERACTION LOGIC
-    // 1. Groups: Respond if MENTIONED (@Bot) OR if ACTIVE SESSION (Quiz Running)
-    // 2. DMs: Respond to everything
+    // � STRICT GROUP LOGIC
     if (chat.isGroup) {
-        const hasActiveSession = quizSessions.has(chat.id._serialized);
-
-        // 🛡️ Improved Detect: Library `mentionedIds` + Raw Text Check (Backup)
+        // 1. Is it a direct mention? (Library regex or @ symbol)
         const myId = client.info.wid._serialized;
         const myNumber = client.info.wid.user;
-        const isMentioned = msg.mentionedIds.includes(myId) || msg.body.includes(`@${myNumber}`);
+        const isTagged = msg.mentionedIds.includes(myId) || msg.body.includes("@") || msg.body.includes(myNumber);
 
-        // If not directly addressed AND not in an active conversation/quiz, ignore.
-        if (!isMentioned && !hasActiveSession) return;
+        // 2. Is there an ACTIVE Quiz?
+        const hasActiveSession = quizSessions.has(chat.id._serialized);
+
+        // CASE: NOT TAGGED
+        if (!isTagged) {
+            // If NO quiz -> IGNORE COMPLETEY.
+            if (!hasActiveSession) return;
+
+            // If QUIZ IS RUNNING -> Only accept simple votes (A,B,C,D,1,2,3,4) or "Stop"
+            const isVote = msg.body.trim().match(/^[a-dA-D1-4]$/);
+            const isStop = msg.body.toLowerCase().includes("stop");
+
+            if (!isVote && !isStop) return; // Ignore random chatter during quiz
+        }
     }
 
-    // Clean prompt: remove mentions to avoid confusing the AI
+    // ✂️ COMMAND EXTRACTION
+    // Remove all mentions from the text so AI sees "Hello" instead of "@12345 Hello"
     let prompt = sanitizeHtml(msg.body.replace(/@\S+/g, "").trim());
 
     // 🧠 HUMAN CONTEXT (REPLIES)
@@ -540,6 +598,26 @@ async function handleMessage(msg) {
     if (!prompt && !mediaPart) return;
     if (prompt.toLowerCase().match(/^(who are you|your name)/)) return msg.reply("I am Siddhartha's AI Assistant.");
 
+    // --- LEVEL 4 TRIGGER: THE ARTIST ---
+    if (prompt.match(/^(draw|generate image|create image|picture of)\b/i)) {
+        const imagePrompt = prompt.replace(/^(draw|generate image|create image|picture of)/i, "").trim();
+        if (imagePrompt) {
+            await handleImageGeneration(msg, imagePrompt);
+            return;
+        }
+    }
+
+    // --- LEVEL 4 TRIGGER: THE RESEARCHER ---
+    let webContext = ""; // For Gemini to use later
+    if (prompt.match(/^(search|google|news about|what happened in)\b/i)) {
+        const searchQuery = prompt.replace(/^(search|google|news about|what happened in)/i, "").trim();
+        if (searchQuery) {
+            webContext = await handleWebSearch(msg, searchQuery);
+            if (!webContext) return; // Search failed or no results
+            // Note: We don't return here. We let the code fall through to Gemini so it can summarize the search results.
+        }
+    }
+
     // PDF MOCK TEST / LEARNING LOGIC
     if (pdfBuffer) {
         // A. LEARNING MODE (Ingest to RAG)
@@ -598,8 +676,13 @@ async function handleMessage(msg) {
         } else {
             let history = chatHistory.get(chat.id._serialized) || [];
 
-            // 🧠 INJECT PROFILE + RAG CONTEXT
+            // 🧠 INJECT PROFILE + RAG + WEB CONTEXT
             let systemContext = "";
+
+            // 0. Web Search Results (Highest Priority)
+            if (webContext) {
+                systemContext += `[REAL-TIME WEB SEARCH RESULTS: ${webContext}]\n(Use these results to answer the user's question accurately.)\n`;
+            }
 
             // 1. RAG Retrieve
             const ragContext = await queryPinecone(prompt);
