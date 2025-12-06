@@ -130,7 +130,13 @@ function checkRateLimit(chatId) {
 
 // --- 6. THE BRAIN (GEMINI + RAG) ---
 const MODEL_NAME = "gemini-2.0-flash";
-const SYSTEM_INSTRUCTION = `You are Siddhartha's AI. QUIZ PROTOCOL: If user asks for Quiz/MCQ -> OUTPUT STRICT JSON: {"type": "quiz_batch", "topic": "Subject", "quizzes": [{"question": "...", "options": ["..."], "correct_index": 0, "answer_explanation": "..."}]}`;
+const SYSTEM_INSTRUCTION = `You are an expert Mentor for Indian Govt Exams (UPSC, SSC, Railways). 
+STYLE: Crisp, Bullet-points, High-Yield Facts only. No fluff. 
+STRUCTURE: 
+1. Direct Answer. 
+2. Key Concept/Formula. 
+3. One "Did You Know?" fact relevant to exams. 
+QUIZ PROTOCOL: If user asks for Quiz/MCQ -> OUTPUT STRICT JSON: {"type": "quiz_batch", "topic": "Subject", "quizzes": [{"question": "...", "options": ["..."], "correct_index": 0, "answer_explanation": "..."}]}`;
 
 function getModel() {
     return genAI.getGenerativeModel({
