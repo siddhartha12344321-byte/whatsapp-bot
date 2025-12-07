@@ -1066,27 +1066,19 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
         if (prompt.toLowerCase().startsWith("draw ")) return await handleImageGeneration(msg, prompt.replace("draw ", ""));
         if (prompt.toLowerCase().startsWith("search ")) return await handleWebSearch(msg, prompt.replace("search ", ""));
 
-        if (msg.hasMedia && prompt.toLowerCase().includes("learn")) {
-            await msg.reply("🧠 Memorizing...");
-            try {
-                const media = await msg.downloadMedia();
-                let text = "";
-                if (media.mimetype === 'application/pdf') {
-                    const data = await pdfParse(Buffer.from(media.data, 'base64'));
-                    text = data.text;
-                } else if (media.mimetype === 'text/plain') text = Buffer.from(media.data, 'base64').toString('utf-8');
-
-                if (text) {
-                    await upsertToPinecone(text, "UserUpload_" + Date.now());
-                    await msg.reply("✅ Memorized.");
-                } else await msg.reply("❌ Invalid File.");
-            } catch (e) { await msg.reply("❌ Error."); }
-            return;
-        }
-
-        if (msg.hasMedia && prompt.toLowerCase().includes("quiz")) {
+        // Handle media files (PDF, images, etc.)
+        if (msg.hasMedia) {
             const media = await msg.downloadMedia();
-            if (media.mimetype === 'application/pdf') {
+            console.log(`📎 Media received: ${media.mimetype}, prompt: ${prompt.substring(0, 50)}`);
+            
+            // Priority 1: PDF Quiz Generation
+            if (media.mimetype === 'application/pdf' && (
+                prompt.toLowerCase().includes("quiz") || 
+                prompt.toLowerCase().includes("test") || 
+                prompt.toLowerCase().includes("mock") ||
+                prompt.toLowerCase().includes("question") ||
+                prompt.toLowerCase().includes("generate")
+            )) {
                 await msg.reply("📄 Analyzing PDF and generating quiz...");
                 const pdfBuffer = Buffer.from(media.data, 'base64');
                 
@@ -1254,8 +1246,11 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
             return;
         }
         
-        // Handle general quiz requests
-        if (prompt.toLowerCase().includes("daily polls") || (prompt.toLowerCase().includes("quiz") && !msg.hasMedia && !prompt.toLowerCase().includes("create") && !prompt.toLowerCase().includes("manual"))) {
+        // Handle general quiz requests - ONLY if explicitly requested
+        const quizKeywords = ["daily polls", "start quiz", "general quiz", "quick quiz", "mock test"];
+        const isExplicitQuizRequest = quizKeywords.some(keyword => prompt.toLowerCase().includes(keyword));
+        
+        if (isExplicitQuizRequest && !msg.hasMedia && !prompt.toLowerCase().includes("create") && !prompt.toLowerCase().includes("manual") && !prompt.toLowerCase().includes("pdf")) {
             if (quizSessions.has(chat.id._serialized)) { 
                 await msg.reply("⚠️ Quiz already active. Type 'stop quiz' to end it first."); 
                 return; 
@@ -1315,42 +1310,54 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                 const userMemories = await getUserMemories(chat.id._serialized, user.userId || chat.id._serialized.split('@')[0]);
                 const memoryContext = userMemories ? `\n\nRemember about this user: ${userMemories}` : '';
                 
+                // Detect if it's an MCQ/poll question (needs UPSC formatting)
+                const isMCQ = prompt.match(/\?/) && (
+                    prompt.match(/^[A-D][).]\s*.+/) || 
+                    prompt.match(/option [A-D]/i) ||
+                    prompt.match(/choose|select|which.*correct/i) ||
+                    isPollReply
+                );
+                
                 const chatSession = model.startChat({
                     history: [
                         { 
                             role: "user", 
                             parts: [{ 
-                                text: `You are an exam tutor. CRITICAL: Keep responses MAX 100 words - SUPER CONCISE!
+                                text: isMCQ 
+                                    ? `You are an exam tutor for UPSC/SSC/government exams. For MCQs/polls, provide structured explanation in MAX 100 words:
 
-RULES:
-1. Answer in 3 parts: Answer → Brief explanation → 1 key point
-2. Use simple language - easy to understand
-3. Short sentences - no long paragraphs
-4. Be encouraging but brief
-5. Focus on what's most important
-6. Remember past conversations and user preferences${memoryContext}
-
-Format:
+Format for MCQs/Polls:
 ✅ Answer: [Option + 1 sentence]
-💡 Why: [2-3 short sentences]
-🔑 Key: [1 concept]
+💡 Explanation: [2-3 short sentences]
+🔑 Key Point: [1 concept]
 
-Students want QUICK, CLEAR answers - not essays! Be attractive, concise, easy to read.` 
+Be concise, clear, and exam-focused.${memoryContext}`
+                                    : `You are a helpful AI assistant. Be natural, conversational, and dynamic. 
+
+Guidelines:
+- Answer naturally based on the question type
+- For general questions: Be friendly and helpful
+- For exam questions: Provide clear, structured answers
+- Keep responses concise but comprehensive
+- Be engaging and human-like
+- Remember past conversations${memoryContext}
+
+Don't force a rigid format - adapt to the question type naturally.` 
                             }],
                         },
                         ...(sessionHistory || [])
                     ]
                 });
                 
-                // Enhance prompt for exam context - Keep it SHORT
+                // Enhance prompt based on question type
                 let enhancedPrompt = prompt;
                 
-                // Detect if it's a question/MCQ
-                if (prompt.match(/\?/) || prompt.match(/^[A-D][).]\s*.+/) || prompt.toLowerCase().includes("which") || prompt.toLowerCase().includes("what is")) {
-                    enhancedPrompt = `Explain this question in MAX 100 words - be CONCISE:\n${prompt}`;
+                // Only format MCQs/polls specially
+                if (isMCQ) {
+                    enhancedPrompt = `As an exam tutor, explain this MCQ/poll in MAX 100 words:\n${prompt}`;
                 }
                 
-                const finalPrompt = context ? `Relevant context from study materials:\n${context}\n\nUser's question: ${enhancedPrompt}` : enhancedPrompt;
+                const finalPrompt = context ? `Relevant context:\n${context}\n\nUser's question: ${enhancedPrompt}` : enhancedPrompt;
                 const result = await chatSession.sendMessage(finalPrompt);
                 responseText = result.response.text();
                 console.log(`✅ Hydra Success with: ${modelName}`);
@@ -1384,14 +1391,21 @@ Students want QUICK, CLEAR answers - not essays! Be attractive, concise, easy to
         await updateHistory(chat.id._serialized, "user", prompt, user.userId || chat.id._serialized.split('@')[0]);
         await updateHistory(chat.id._serialized, "model", responseText, user.userId || chat.id._serialized.split('@')[0]);
 
-        if (isVoice) {
-            try {
-                const url = googleTTS.getAudioUrl(responseText, { lang: 'en', slow: false });
-                const media = await MessageMedia.fromUrl(url, { unsafeMime: true });
-                await client.sendMessage(msg.from, media, { sendAudioAsVoice: true });
-            } catch (e) { await msg.reply(responseText); }
+        // Only format MCQs/polls in UPSC style, send others as-is
+        if (isMCQ || isPollReply) {
+            const formattedResponse = formatExamTutorResponse(null, responseText, isPollReply);
+            await msg.reply(formattedResponse);
         } else {
-            await msg.reply(responseText);
+            // Send natural response for general questions
+            if (isVoice) {
+                try {
+                    const url = googleTTS.getAudioUrl(responseText, { lang: 'en', slow: false });
+                    const media = await MessageMedia.fromUrl(url, { unsafeMime: true });
+                    await client.sendMessage(msg.from, media, { sendAudioAsVoice: true });
+                } catch (e) { await msg.reply(responseText); }
+            } else {
+                await msg.reply(responseText);
+            }
         }
         console.log("✅ Reply Sent.");
 
