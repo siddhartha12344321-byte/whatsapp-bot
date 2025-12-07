@@ -1348,34 +1348,32 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                 prompt.toLowerCase().includes("question") ||
                 prompt.toLowerCase().includes("generate")
             )) {
-                try {
-                    await msg.reply("📄 Analyzing PDF and generating quiz...").catch(() => {});
-                    const pdfBuffer = Buffer.from(media.data, 'base64');
+                await msg.reply("📄 Analyzing PDF and generating quiz...");
+                const pdfBuffer = Buffer.from(media.data, 'base64');
 
-                    // Enhanced timer parsing - supports multiple formats
-                    let timer = 30; // default 30 seconds
-                    const timePatterns = [
-                        /every\s+(\d+)\s*(second|sec|s|minute|min|m)/i,
-                        /timer\s*[:=]\s*(\d+)\s*(second|sec|s|minute|min|m)/i,
-                        /(\d+)\s*(second|sec|s|minute|min|m)\s*(?:timer|interval|per\s+question)/i,
-                        /(\d+)\s*(?:s|sec|second|seconds)/i,
-                        /(\d+)\s*(?:m|min|minute|minutes)/i
-                    ];
+                // Enhanced timer parsing - supports multiple formats
+                let timer = 30; // default 30 seconds
+                const timePatterns = [
+                    /every\s+(\d+)\s*(second|sec|s|minute|min|m)/i,
+                    /timer\s*[:=]\s*(\d+)\s*(second|sec|s|minute|min|m)/i,
+                    /(\d+)\s*(second|sec|s|minute|min|m)\s*(?:timer|interval|per\s+question)/i,
+                    /(\d+)\s*(?:s|sec|second|seconds)/i,
+                    /(\d+)\s*(?:m|min|minute|minutes)/i
+                ];
 
-                    for (const pattern of timePatterns) {
-                        const match = prompt.match(pattern);
-                        if (match) {
-                            const value = parseInt(match[1]);
-                            const unit = (match[2] || match[0]).toLowerCase();
-                            if (unit.includes('m') || unit.includes('min')) {
-                                timer = value * 60;
-                            } else {
-                                timer = value;
-                            }
-                            // Ensure minimum 5 seconds and maximum 300 seconds (5 minutes)
-                            timer = Math.max(5, Math.min(300, timer));
-                            break;
+                for (const pattern of timePatterns) {
+                    const match = prompt.match(pattern);
+                    if (match) {
+                        const value = parseInt(match[1]);
+                        const unit = (match[2] || match[0]).toLowerCase();
+                        if (unit.includes('m') || unit.includes('min')) {
+                            timer = value * 60;
+                        } else {
+                            timer = value;
                         }
+                        // Ensure minimum 5 seconds and maximum 300 seconds (5 minutes)
+                        timer = Math.max(5, Math.min(300, timer));
+                        break;
                     }
                 }
 
@@ -1415,14 +1413,14 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
 
                 // Validate PDF buffer before processing
                 if (!pdfBuffer || pdfBuffer.length === 0) {
-                    await msg.reply("❌ PDF file is empty or corrupted. Please send a valid PDF file.").catch(() => {});
+                    await msg.reply("❌ PDF file is empty or corrupted. Please send a valid PDF file.");
                     return;
                 }
 
                 console.log(`📄 Processing PDF: ${(pdfBuffer.length / 1024).toFixed(2)}KB, Topic: "${topic}", Timer: ${timer}s, Qty: ${qty}`);
 
                 try {
-                    await msg.reply(`🔍 Reading PDF and searching for "${topic}" questions...`).catch(() => {});
+                    await msg.reply(`🔍 Reading PDF and searching for "${topic}" questions...`);
 
                     const questions = await quizEngine.generateQuizFromPdfBuffer({
                         pdfBuffer,
@@ -1432,29 +1430,24 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                     });
 
                     if (questions.length === 0) {
-                        await msg.reply(`❌ No questions found for topic "${topic}" in the PDF.\n\n💡 Try:\n• Different topic name\n• Check if PDF contains "${topic}" content\n• Use "PDF Content" for general quiz`).catch(() => {});
+                        await msg.reply(`❌ No questions found for topic "${topic}" in the PDF.\n\n💡 Try:\n• Different topic name\n• Check if PDF contains "${topic}" content\n• Use "PDF Content" for general quiz`);
                         return;
                     }
 
-                    await msg.reply(`✅ Generated ${questions.length} questions on "${topic}"\n⏱️ Timer: ${timer}s per question\n\n🎯 Starting quiz now!`).catch(() => {});
-                    try {
-                        quizEngine.startQuiz(chat, chat.id._serialized, questions, topic, timer);
-                    } catch (quizErr) {
-                        console.error("⚠️ PDF quiz start error:", quizErr.message?.substring(0, 80));
-                        await msg.reply("⚠️ Quiz starting... please wait.").catch(() => {});
-                    }
+                    await msg.reply(`✅ Generated ${questions.length} questions on "${topic}"\n⏱️ Timer: ${timer}s per question\n\n🎯 Starting quiz now!`);
+                    quizEngine.startQuiz(chat, chat.id._serialized, questions, topic, timer);
                 } catch (e) {
                     console.error("PDF Quiz Generation Error:", e);
                     const errorMsg = e.message || 'Unknown error';
 
                     if (errorMsg.includes("empty") || errorMsg.includes("invalid")) {
-                        await msg.reply(`❌ PDF Error: ${errorMsg}\n\nPlease send a valid PDF file.`).catch(() => {});
+                        await msg.reply(`❌ PDF Error: ${errorMsg}\n\nPlease send a valid PDF file.`);
                     } else if (errorMsg.includes("quota") || errorMsg.includes("429")) {
-                        await msg.reply(`⚠️ API quota exceeded. Please wait a few minutes and try again.`).catch(() => {});
+                        await msg.reply(`⚠️ API quota exceeded. Please wait a few minutes and try again.`);
                     } else if (errorMsg.includes("No questions")) {
-                        await msg.reply(`❌ ${errorMsg}\n\n💡 Suggestions:\n• Try a different topic\n• Check if PDF contains the topic\n• Use general "PDF Content" topic`).catch(() => {});
+                        await msg.reply(`❌ ${errorMsg}\n\n💡 Suggestions:\n• Try a different topic\n• Check if PDF contains the topic\n• Use general "PDF Content" topic`);
                     } else {
-                        await msg.reply(`❌ Error: ${errorMsg}\n\nPlease check:\n• PDF is valid and readable\n• Topic exists in PDF\n• Try again in a moment`).catch(() => {});
+                        await msg.reply(`❌ Error: ${errorMsg}\n\nPlease check:\n• PDF is valid and readable\n• Topic exists in PDF\n• Try again in a moment`);
                     }
                 }
                 return;
