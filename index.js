@@ -2,19 +2,40 @@ const { Client, LocalAuth, RemoteAuth, Poll, MessageMedia } = require('whatsapp-
 const { MongoStore } = require('wwebjs-mongo');
 const qrcode = require('qrcode-terminal');
 const QRCodeImage = require('qrcode');
+const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generative-ai");
+const express = require('express');
+const fs = require('fs');
+const sanitizeHtml = require('sanitize-html');
+const chromium = require('@sparticuz/chromium');
+const puppeteer = require('puppeteer-core');
+const pdfParse = require('pdf-parse');
+const mongoose = require('mongoose');
+const { Pinecone } = require('@pinecone-database/pinecone');
+const googleTTS = require('google-tts-api');
+const QuizEngine = require('./quiz-engine');
+
 const indexName = 'whatsapp-bot';
 
+// --- CONFIGURATION ---
+const MONGODB_URI = process.env.MONGODB_URI || "mongodb+srv://amurag12344321_db_user:78mbO8WPw69AeTpt@siddharthawhatsappbot.wfbdgjf.mongodb.net/?appName=SiddharthaWhatsappBot";
+const PINECONE_API_KEY = process.env.PINECONE_API_KEY || 'pcsk_4YGs7G_FB4bw1RbEejhHeiwEeL8wrU2vS1vQfFS2TcdhxJjsrehCHMyeFtHw4cHJkWPZvc';
+
 // --- CONNECTIONS ---
-// 1. MongoDB
 // 1. MongoDB (Initialized in startClient)
 
 // 2. Pinecone
 const pc = new Pinecone({ apiKey: PINECONE_API_KEY });
 
-// 3. Gemini
 // 3. Groq (Replaces Gemini)
 const quizEngine = new QuizEngine(process.env.GROQ_API_KEY);
-let genAI = null; // Deprecated
+
+// Legacy Gemini Keys (Restored for safety of legacy functions)
+const rawKeys = [
+    process.env.GEMINI_API_KEY_2,
+    process.env.GEMINI_API_KEY
+].filter(Boolean);
+let currentKeyIndex = 0;
+let genAI = null; // Deprecated but defined
 
 function rotateKey() {
     currentKeyIndex = (currentKeyIndex + 1) % rawKeys.length;
