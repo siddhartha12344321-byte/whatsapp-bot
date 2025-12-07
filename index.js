@@ -41,12 +41,30 @@ function rotateKey() {
 function getModel() {
     if (!genAI) rotateKey();
     return genAI.getGenerativeModel({
-        model: "gemini-1.5-flash",
+        model: "gemini-1.5-flash-001", // Precise version to avoid 404
         safetySettings: [
             { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
             { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
         ]
     });
+}
+
+// ... Data Schemas ...
+
+// ... (Skip to Helper Functions) ...
+
+async function getEmbedding(text) {
+    try {
+        return await callWithRetry(async () => {
+            if (!genAI) rotateKey();
+            const model = genAI.getGenerativeModel({ model: "text-embedding-004" }); // CORRECT MODEL
+            const result = await model.embedContent(text);
+            return result.embedding.values;
+        });
+    } catch (e) {
+        console.error("Embedding Error (Final):", e.message);
+        return null; // Fail gracefully
+    }
 }
 
 // --- DATA SCHEMAS ---
