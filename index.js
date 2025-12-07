@@ -39,7 +39,30 @@ const app = express();
 const port = process.env.PORT || 3000;
 let qrCodeData = "";
 
-app.get('/', (req, res) => res.send('Bot is Alive! <a href="/qr">Scan QR Code</a>'));
+app.get('/', (req, res) => {
+    let status = 'Initializing...';
+    let color = 'orange';
+
+    if (client && client.info && client.info.wid) {
+        status = '✅ WhatsApp Connected (' + client.info.pushname + ')';
+        color = 'green';
+    } else if (qrCodeData) {
+        status = '⚠️ Disconnected. <a href="/qr">Scan QR Code Now</a>';
+        color = 'red';
+    }
+
+    res.send(`
+        <html>
+            <head><meta http-equiv="refresh" content="10"></head>
+            <body style="font-family: sans-serif; text-align: center; padding-top: 50px;">
+                <h1>🤖 Bot Status</h1>
+                <h2 style="color: ${color};">${status}</h2>
+                <p>Uptime: ${process.uptime().toFixed(0)} seconds</p>
+                <small>Auto-refreshes every 10s</small>
+            </body>
+        </html>
+    `);
+});
 app.get('/qr', async (req, res) => {
     if (!qrCodeData) return res.send('<h2 style="color:orange;">⏳ Generating QR... Check back in 10s or Check Logs.</h2>');
     try {
@@ -577,282 +600,288 @@ async function handleWebSearch(msg, query) {
 
 // --- 13. MAIN HANDLER ---
 async function handleMessage(msg) {
-    const chat = await msg.getChat();
+    try {
+        console.log(`📩 RECEIVED: ${msg.body} from ${msg.from}`); // DEBUG LOG
+        const chat = await msg.getChat();
 
-    // � STRICT GROUP LOGIC
-    if (chat.isGroup) {
-        // 1. Is it a direct mention? (Library regex or @ symbol)
-        const myId = client.info.wid._serialized;
-        const myNumber = client.info.wid.user;
-        const isTagged = msg.mentionedIds.includes(myId) || msg.body.includes("@") || msg.body.includes(myNumber);
+        // � STRICT GROUP LOGIC
+        if (chat.isGroup) {
+            // 1. Is it a direct mention? (Library regex or @ symbol)
+            const myId = client.info.wid._serialized;
+            const myNumber = client.info.wid.user;
+            const isTagged = msg.mentionedIds.includes(myId) || msg.body.includes("@") || msg.body.includes(myNumber);
 
-        // 2. Is there an ACTIVE Quiz?
-        const hasActiveSession = quizSessions.has(chat.id._serialized);
+            // 2. Is there an ACTIVE Quiz?
+            const hasActiveSession = quizSessions.has(chat.id._serialized);
 
-        // CASE: NOT TAGGED
-        if (!isTagged) {
-            // If NO quiz -> IGNORE COMPLETEY.
-            if (!hasActiveSession) return;
+            // CASE: NOT TAGGED
+            if (!isTagged) {
+                // If NO quiz -> IGNORE COMPLETEY.
+                if (!hasActiveSession) return;
 
-            // If QUIZ IS RUNNING -> Only accept simple votes (A,B,C,D,1,2,3,4) or "Stop"
-            const isVote = msg.body.trim().match(/^[a-dA-D1-4]$/);
-            const isStop = msg.body.toLowerCase().includes("stop");
+                // If QUIZ IS RUNNING -> Only accept simple votes (A,B,C,D,1,2,3,4) or "Stop"
+                const isVote = msg.body.trim().match(/^[a-dA-D1-4]$/);
+                const isStop = msg.body.toLowerCase().includes("stop");
 
-            if (!isVote && !isStop) return; // Ignore random chatter during quiz
-        }
-    }
-
-    // ✂️ COMMAND EXTRACTION
-    // Remove all mentions from the text so AI sees "Hello" instead of "@12345 Hello"
-    let prompt = sanitizeHtml(msg.body.replace(/@\S+/g, "").trim());
-
-    // 🧠 HUMAN CONTEXT (REPLIES)
-    // If user replies to a message, the AI should know what they are replying to.
-    if (msg.hasQuotedMsg) {
-        try {
-            const quotedMsg = await msg.getQuotedMessage();
-            if (quotedMsg && quotedMsg.body) {
-                // Prepend context so AI understands "it", "that", "him", etc.
-                prompt = `[Context - Replying to: "${sanitizeHtml(quotedMsg.body)}"]\n${prompt}`;
-            }
-        } catch (e) { /* Ignore fetch error */ }
-    }
-
-    // Rate Limit Check
-    if (!checkRateLimit(chat.id._serialized)) return;
-
-    if (await handleTextAsVoteFallback(msg, chat, prompt)) return;
-
-    if (prompt.toLowerCase().includes("stop quiz")) {
-        if (quizSessions.has(chat.id._serialized)) {
-            quizSessions.delete(chat.id._serialized);
-            await msg.reply("🛑 Quiz stopped.");
-        }
-        return;
-    }
-
-    let mediaPart = null;
-    let timerSeconds = 30;
-    let questionLimit = 10;
-    let difficulty = "medium";
-    let topic = "General Knowledge";
-
-    const timeMatch = prompt.match(/every (\d+)\s*(s|sec|min|m)/i);
-    if (timeMatch) timerSeconds = parseInt(timeMatch[1]) * (timeMatch[2].startsWith('m') ? 60 : 1);
-
-    const countMatch = prompt.match(/(\d+)\s*(q|ques|question)/i);
-    if (countMatch) questionLimit = Math.min(parseInt(countMatch[1]), 25);
-
-    if (prompt.toLowerCase().includes("easy")) difficulty = "easy";
-    if (prompt.toLowerCase().includes("hard")) difficulty = "hard";
-    const topicMatch = prompt.match(/quiz\s+on\s+(.+?)(?:\s|$)/i);
-    if (topicMatch) topic = topicMatch[1].trim();
-
-    let pdfBuffer = null;
-    let messageWithMedia = msg.hasMedia ? msg : (msg.hasQuotedMsg ? await msg.getQuotedMessage() : null);
-
-    // ♾️ INFINITE POLLS (AUTO-GENERATE FROM NEWS)
-    if (prompt.match(/^(daily polls|daily quiz|news quiz)/i)) {
-        if (!process.env.TAVILY_API_KEY) return msg.reply("⚠️ Tavily Key required for Daily Polls.");
-        await msg.reply("🌍 Fetching today's top news for the quiz...");
-
-        try {
-            const date = new Date().toDateString();
-            const searchRes = await handleWebSearch(msg, `Important current affairs questions India ${date} UPSC SSC`);
-            if (searchRes) {
-                // We hijack the prompt to force the AI to make a quiz from this text
-                prompt = `GENERATE QUIZ BATCH from these search results: ${searchRes}`;
-                topic = `Daily News (${date})`;
-                questionLimit = 5; // Keep it short and fresh
-            }
-        } catch (e) { console.error(e); }
-    }
-
-    if (messageWithMedia && messageWithMedia.hasMedia) {
-        const media = await messageWithMedia.downloadMedia();
-        if (media) {
-            if (media.mimetype === 'application/pdf') {
-                pdfBuffer = Buffer.from(media.data, 'base64');
-                mediaPart = { inlineData: { data: media.data, mimeType: media.mimetype } };
-            } else if (media.mimetype === 'text/plain') {
-                // 📄 TEXT FILE SUPPORT (Chat Exports)
-                pdfBuffer = Buffer.from(media.data, 'base64'); // We reuse pdfBuffer var for simplicity, treating it as a raw doc
-                mediaPart = { inlineData: { data: media.data, mimeType: 'text/plain' } };
-            } else if (media.mimetype.startsWith('image/')) {
-                mediaPart = { inlineData: { data: media.data, mimeType: media.mimetype } };
-            } else if (media.mimetype.startsWith('audio/')) {
-                // 🎤 LEVEL 5: VOICE MODE (LISTENING)
-                mediaPart = { inlineData: { data: media.data, mimeType: media.mimetype } };
-                if (!prompt) prompt = "Listen to this audio and reply to the user concisely.";
+                if (!isVote && !isStop) return; // Ignore random chatter during quiz
             }
         }
-    }
 
-    if (!prompt && !mediaPart) return;
-    if (prompt.toLowerCase().match(/^(who are you|your name)/)) return msg.reply("I am Siddhartha's AI Assistant.");
+        // ✂️ COMMAND EXTRACTION
+        // Remove all mentions from the text so AI sees "Hello" instead of "@12345 Hello"
+        let prompt = sanitizeHtml(msg.body.replace(/@\S+/g, "").trim());
 
-    // --- LEVEL 4 TRIGGER: THE ARTIST ---
-    if (prompt.match(/^(draw|generate image|create image|picture of)\b/i)) {
-        const imagePrompt = prompt.replace(/^(draw|generate image|create image|picture of)/i, "").trim();
-        if (imagePrompt) {
-            await handleImageGeneration(msg, imagePrompt);
+        // 🧠 HUMAN CONTEXT (REPLIES)
+        // If user replies to a message, the AI should know what they are replying to.
+        if (msg.hasQuotedMsg) {
+            try {
+                const quotedMsg = await msg.getQuotedMessage();
+                if (quotedMsg && quotedMsg.body) {
+                    // Prepend context so AI understands "it", "that", "him", etc.
+                    prompt = `[Context - Replying to: "${sanitizeHtml(quotedMsg.body)}"]\n${prompt}`;
+                }
+            } catch (e) { /* Ignore fetch error */ }
+        }
+
+        // Rate Limit Check
+        if (!checkRateLimit(chat.id._serialized)) return;
+
+        if (await handleTextAsVoteFallback(msg, chat, prompt)) return;
+
+        if (prompt.toLowerCase().includes("stop quiz")) {
+            if (quizSessions.has(chat.id._serialized)) {
+                quizSessions.delete(chat.id._serialized);
+                await msg.reply("🛑 Quiz stopped.");
+            }
             return;
         }
-    }
 
-    // --- LEVEL 4 TRIGGER: THE RESEARCHER ---
-    let webContext = ""; // For Gemini to use later
-    if (prompt.match(/^(search|google|news about|what happened in)\b/i)) {
-        const searchQuery = prompt.replace(/^(search|google|news about|what happened in)/i, "").trim();
-        if (searchQuery) {
-            webContext = await handleWebSearch(msg, searchQuery);
-            if (!webContext) return; // Search failed or no results
-            // Note: We don't return here. We let the code fall through to Gemini so it can summarize the search results.
-        }
-    }
+        let mediaPart = null;
+        let timerSeconds = 30;
+        let questionLimit = 10;
+        let difficulty = "medium";
+        let topic = "General Knowledge";
 
-    // PDF / TEXT LEARNING LOGIC
-    if (pdfBuffer) {
-        // A. LEARNING MODE (Ingest to RAG)
-        if (prompt.toLowerCase().includes("learn") || prompt.toLowerCase().includes("save") || prompt.toLowerCase().includes("read")) {
-            await msg.reply(`🧠 Reading & Memorizing Document...`);
+        const timeMatch = prompt.match(/every (\d+)\s*(s|sec|min|m)/i);
+        if (timeMatch) timerSeconds = parseInt(timeMatch[1]) * (timeMatch[2].startsWith('m') ? 60 : 1);
+
+        const countMatch = prompt.match(/(\d+)\s*(q|ques|question)/i);
+        if (countMatch) questionLimit = Math.min(parseInt(countMatch[1]), 25);
+
+        if (prompt.toLowerCase().includes("easy")) difficulty = "easy";
+        if (prompt.toLowerCase().includes("hard")) difficulty = "hard";
+        const topicMatch = prompt.match(/quiz\s+on\s+(.+?)(?:\s|$)/i);
+        if (topicMatch) topic = topicMatch[1].trim();
+
+        let pdfBuffer = null;
+        let messageWithMedia = msg.hasMedia ? msg : (msg.hasQuotedMsg ? await msg.getQuotedMessage() : null);
+
+        // ♾️ INFINITE POLLS (AUTO-GENERATE FROM NEWS)
+        if (prompt.match(/^(daily polls|daily quiz|news quiz)/i)) {
+            if (!process.env.TAVILY_API_KEY) return msg.reply("⚠️ Tavily Key required for Daily Polls.");
+            await msg.reply("🌍 Fetching today's top news for the quiz...");
+
             try {
-                let text = "";
-                if (mediaPart && mediaPart.inlineData.mimeType === 'text/plain') {
-                    text = pdfBuffer.toString('utf-8'); // Raw text from Chat Export
-                } else {
-                    const data = await pdfParse(pdfBuffer); // PDF OCR
-                    text = data.text;
+                const date = new Date().toDateString();
+                const searchRes = await handleWebSearch(msg, `Important current affairs questions India ${date} UPSC SSC`);
+                if (searchRes) {
+                    // We hijack the prompt to force the AI to make a quiz from this text
+                    prompt = `GENERATE QUIZ BATCH from these search results: ${searchRes}`;
+                    topic = `Daily News (${date})`;
+                    questionLimit = 5; // Keep it short and fresh
                 }
+            } catch (e) { console.error(e); }
+        }
 
-                if (!text || text.length < 10) throw new Error("File is empty or unreadable.");
+        if (messageWithMedia && messageWithMedia.hasMedia) {
+            const media = await messageWithMedia.downloadMedia();
+            if (media) {
+                if (media.mimetype === 'application/pdf') {
+                    pdfBuffer = Buffer.from(media.data, 'base64');
+                    mediaPart = { inlineData: { data: media.data, mimeType: media.mimetype } };
+                } else if (media.mimetype === 'text/plain') {
+                    // 📄 TEXT FILE SUPPORT (Chat Exports)
+                    pdfBuffer = Buffer.from(media.data, 'base64'); // We reuse pdfBuffer var for simplicity, treating it as a raw doc
+                    mediaPart = { inlineData: { data: media.data, mimeType: 'text/plain' } };
+                } else if (media.mimetype.startsWith('image/')) {
+                    mediaPart = { inlineData: { data: media.data, mimeType: media.mimetype } };
+                } else if (media.mimetype.startsWith('audio/')) {
+                    // 🎤 LEVEL 5: VOICE MODE (LISTENING)
+                    mediaPart = { inlineData: { data: media.data, mimeType: media.mimetype } };
+                    if (!prompt) prompt = "Listen to this audio and reply to the user concisely.";
+                }
+            }
+        }
 
-                await upsertToPinecone(text, "UserUpload_" + Date.now());
-                await msg.reply("✅ Memorized! I can now recall this information.");
+        if (!prompt && !mediaPart) return;
+        if (prompt.toLowerCase().match(/^(who are you|your name)/)) return msg.reply("I am Siddhartha's AI Assistant.");
+
+        // --- LEVEL 4 TRIGGER: THE ARTIST ---
+        if (prompt.match(/^(draw|generate image|create image|picture of)\b/i)) {
+            const imagePrompt = prompt.replace(/^(draw|generate image|create image|picture of)/i, "").trim();
+            if (imagePrompt) {
+                await handleImageGeneration(msg, imagePrompt);
+                return;
+            }
+        }
+
+        // --- LEVEL 4 TRIGGER: THE RESEARCHER ---
+        let webContext = ""; // For Gemini to use later
+        if (prompt.match(/^(search|google|news about|what happened in)\b/i)) {
+            const searchQuery = prompt.replace(/^(search|google|news about|what happened in)/i, "").trim();
+            if (searchQuery) {
+                webContext = await handleWebSearch(msg, searchQuery);
+                if (!webContext) return; // Search failed or no results
+                // Note: We don't return here. We let the code fall through to Gemini so it can summarize the search results.
+            }
+        }
+
+        // PDF / TEXT LEARNING LOGIC
+        if (pdfBuffer) {
+            // A. LEARNING MODE (Ingest to RAG)
+            if (prompt.toLowerCase().includes("learn") || prompt.toLowerCase().includes("save") || prompt.toLowerCase().includes("read")) {
+                await msg.reply(`🧠 Reading & Memorizing Document...`);
+                try {
+                    let text = "";
+                    if (mediaPart && mediaPart.inlineData.mimeType === 'text/plain') {
+                        text = pdfBuffer.toString('utf-8'); // Raw text from Chat Export
+                    } else {
+                        const data = await pdfParse(pdfBuffer); // PDF OCR
+                        text = data.text;
+                    }
+
+                    if (!text || text.length < 10) throw new Error("File is empty or unreadable.");
+
+                    await upsertToPinecone(text, "UserUpload_" + Date.now());
+                    await msg.reply("✅ Memorized! I can now recall this information.");
+                } catch (e) {
+                    console.error(e);
+                    await msg.reply("❌ Failed to memorize.");
+                }
+                return;
+            }
+        }
+
+        // B. EXISTING MOCK TEST LOGIC
+        if (pdfBuffer && (prompt.toLowerCase().includes("mocktest") || prompt.toLowerCase().includes("quiz"))) {
+            await msg.reply(`🔎 Generating Mock Test from PDF: ${topic}...`);
+            try {
+                const questions = await generateQuizFromPdfBuffer({ pdfBuffer, topic, qty: questionLimit, difficulty });
+                await msg.reply(`🎰 **Mock Test Ready!**\nQs: ${questions.length} | Timer: ${timerSeconds}s`);
+
+                quizSessions.set(chat.id._serialized, {
+                    questions, index: 0, timer: timerSeconds, active: true, scores: new Map(), creditedVotes: new Set(), topic
+                });
+                setTimeout(() => { runQuizStep(chat, chat.id._serialized); }, 3000);
             } catch (e) {
                 console.error(e);
-                await msg.reply("❌ Failed to memorize.");
+                await msg.reply("⚠️ Error reading PDF. Ensure it has readable text.");
             }
             return;
         }
-    }
 
-    // B. EXISTING MOCK TEST LOGIC
-    if (pdfBuffer && (prompt.toLowerCase().includes("mocktest") || prompt.toLowerCase().includes("quiz"))) {
-        await msg.reply(`🔎 Generating Mock Test from PDF: ${topic}...`);
+        // GENERAL AI / IMAGE / QUIZ
+        const isQuiz = prompt.toLowerCase().includes("quiz") || prompt.toLowerCase().includes("test") || prompt.toLowerCase().includes("mcq");
+
+        // 🧠 LOAD USER PROFILE
+        // 🧠 LOAD DATA PARALLEL (SPEED BOOST ⚡)
+        let userProfile = null;
+        let ragContext = null;
+
         try {
-            const questions = await generateQuizFromPdfBuffer({ pdfBuffer, topic, qty: questionLimit, difficulty });
-            await msg.reply(`🎰 **Mock Test Ready!**\nQs: ${questions.length} | Timer: ${timerSeconds}s`);
+            const contactPromise = msg.getContact();
+            const ragPromise = queryPinecone(prompt);
 
-            quizSessions.set(chat.id._serialized, {
-                questions, index: 0, timer: timerSeconds, active: true, scores: new Map(), creditedVotes: new Set(), topic
-            });
-            setTimeout(() => { runQuizStep(chat, chat.id._serialized); }, 3000);
-        } catch (e) {
-            console.error(e);
-            await msg.reply("⚠️ Error reading PDF. Ensure it has readable text.");
-        }
-        return;
-    }
+            // Wait for both simultaneously
+            const [contact, ragResult] = await Promise.all([contactPromise, ragPromise]);
 
-    // GENERAL AI / IMAGE / QUIZ
-    const isQuiz = prompt.toLowerCase().includes("quiz") || prompt.toLowerCase().includes("test") || prompt.toLowerCase().includes("mcq");
+            ragContext = ragResult;
+            const name = contact.pushname || "Friend";
+            // Fire and forget update (don't await this for speed)
+            updateUserProfile(msg.from, name, isQuiz ? topic : "Chat").then(p => userProfile = p).catch(e => { });
 
-    // 🧠 LOAD USER PROFILE
-    // 🧠 LOAD DATA PARALLEL (SPEED BOOST ⚡)
-    let userProfile = null;
-    let ragContext = null;
+        } catch (e) { }
 
-    try {
-        const contactPromise = msg.getContact();
-        const ragPromise = queryPinecone(prompt);
+        try {
+            const model = getModel();
+            let responseText = "";
 
-        // Wait for both simultaneously
-        const [contact, ragResult] = await Promise.all([contactPromise, ragPromise]);
-
-        ragContext = ragResult;
-        const name = contact.pushname || "Friend";
-        // Fire and forget update (don't await this for speed)
-        updateUserProfile(msg.from, name, isQuiz ? topic : "Chat").then(p => userProfile = p).catch(e => { });
-
-    } catch (e) { }
-
-    try {
-        const model = getModel();
-        let responseText = "";
-
-        if (isQuiz) {
-            const finalPrompt = `[GENERATE QUIZ BATCH JSON - Count: ${questionLimit}, Topic: "${topic}", Difficulty: ${difficulty}] ${prompt}`;
-            const content = mediaPart ? [finalPrompt, mediaPart] : [finalPrompt];
-            const result = await model.generateContent(content);
-            responseText = result.response.text();
-        } else {
-            let history = chatHistory.get(chat.id._serialized) || [];
-
-            // 🧠 INJECT PROFILE + RAG + WEB CONTEXT
-            let systemContext = "";
-
-            if (webContext) systemContext += `[REAL-TIME SEARCH: ${webContext}]\n`;
-            if (ragContext) systemContext += `[MEMORY: ${ragContext}]\n`;
-            if (userProfile) systemContext += `[User: ${userProfile.name}, XP: ${userProfile.highScore}]\n`;
-
-            if (mediaPart) {
-                const content = [systemContext + (prompt || "Analyze this"), mediaPart];
+            if (isQuiz) {
+                const finalPrompt = `[GENERATE QUIZ BATCH JSON - Count: ${questionLimit}, Topic: "${topic}", Difficulty: ${difficulty}] ${prompt}`;
+                const content = mediaPart ? [finalPrompt, mediaPart] : [finalPrompt];
                 const result = await model.generateContent(content);
                 responseText = result.response.text();
             } else {
-                const chatSession = model.startChat({ history });
-                const result = await chatSession.sendMessage(systemContext + prompt);
-                responseText = result.response.text();
-                updateHistory(chat.id._serialized, "user", prompt);
-                updateHistory(chat.id._serialized, "model", responseText);
-            }
-        }
+                let history = chatHistory.get(chat.id._serialized) || [];
 
-        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+                // 🧠 INJECT PROFILE + RAG + WEB CONTEXT
+                let systemContext = "";
 
-        if (isQuiz && jsonMatch) {
-            try {
-                const data = JSON.parse(jsonMatch[0]);
-                let questions = data.quizzes || data.questions;
-                if (questions) {
-                    questions = questions.map(q => ({
-                        question: q.questionText || q.question,
-                        options: q.options,
-                        correct_index: typeof q.correctAnswer === 'string' ? q.options.indexOf(q.correctAnswer) : q.correctAnswer,
-                        answer_explanation: q.explanation || q.answer_explanation
-                    })).slice(0, questionLimit);
+                if (webContext) systemContext += `[REAL-TIME SEARCH: ${webContext}]\n`;
+                if (ragContext) systemContext += `[MEMORY: ${ragContext}]\n`;
+                if (userProfile) systemContext += `[User: ${userProfile.name}, XP: ${userProfile.highScore}]\n`;
 
-                    await msg.reply(`🎰 **Quiz Loaded: ${data.topic || topic}**\nQs: ${questions.length} | Timer: ${timerSeconds}s`);
-                    quizSessions.set(chat.id._serialized, {
-                        questions, index: 0, timer: timerSeconds, active: true, scores: new Map(), creditedVotes: new Set(), topic: data.topic
-                    });
-                    setTimeout(() => { runQuizStep(chat, chat.id._serialized); }, 3000);
+                if (mediaPart) {
+                    const content = [systemContext + (prompt || "Analyze this"), mediaPart];
+                    const result = await model.generateContent(content);
+                    responseText = result.response.text();
+                } else {
+                    const chatSession = model.startChat({ history });
+                    const result = await chatSession.sendMessage(systemContext + prompt);
+                    responseText = result.response.text();
+                    updateHistory(chat.id._serialized, "user", prompt);
+                    updateHistory(chat.id._serialized, "model", responseText);
                 }
-            } catch (e) { await msg.reply("⚠️ AI formatting error."); }
-        } else if (!isQuiz) {
-            // 🗣️ LEVEL 5: VOICE MODE (SPEAKING)
-            // If the user sent an audio message (PTT/Audio) OR explicitly asks to "speak", we reply with Audio.
-            const isVoiceMessage = msg.type === 'ptt' || msg.type === 'audio' || prompt.match(/\b(speak|say|voice|tell me in voice)\b/i);
+            }
 
-            if (isVoiceMessage) {
+            const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+
+            if (isQuiz && jsonMatch) {
                 try {
-                    // Convert AI text to Audio (MP3)
-                    const ttsUrl = googleTTS.getAudioUrl(responseText, { lang: 'en', slow: false });
-                    const audioMedia = await MessageMedia.fromUrl(ttsUrl, { unsafeMime: true });
-                    await client.sendMessage(msg.from, audioMedia, { sendAudioAsVoice: true });
-                    // We also send text for clarity (Optional, but good UX)
-                    // await msg.reply(responseText); 
-                } catch (e) {
-                    console.error("TTS Error:", e);
-                    await msg.reply(responseText); // Fallback to text
+                    const data = JSON.parse(jsonMatch[0]);
+                    let questions = data.quizzes || data.questions;
+                    if (questions) {
+                        questions = questions.map(q => ({
+                            question: q.questionText || q.question,
+                            options: q.options,
+                            correct_index: typeof q.correctAnswer === 'string' ? q.options.indexOf(q.correctAnswer) : q.correctAnswer,
+                            answer_explanation: q.explanation || q.answer_explanation
+                        })).slice(0, questionLimit);
+
+                        await msg.reply(`🎰 **Quiz Loaded: ${data.topic || topic}**\nQs: ${questions.length} | Timer: ${timerSeconds}s`);
+                        quizSessions.set(chat.id._serialized, {
+                            questions, index: 0, timer: timerSeconds, active: true, scores: new Map(), creditedVotes: new Set(), topic: data.topic
+                        });
+                        setTimeout(() => { runQuizStep(chat, chat.id._serialized); }, 3000);
+                    }
+                } catch (e) { await msg.reply("⚠️ AI formatting error."); }
+            } else if (!isQuiz) {
+                // 🗣️ LEVEL 5: VOICE MODE (SPEAKING)
+                // If the user sent an audio message (PTT/Audio) OR explicitly asks to "speak", we reply with Audio.
+                const isVoiceMessage = msg.type === 'ptt' || msg.type === 'audio' || prompt.match(/\b(speak|say|voice|tell me in voice)\b/i);
+
+                if (isVoiceMessage) {
+                    try {
+                        // Convert AI text to Audio (MP3)
+                        const ttsUrl = googleTTS.getAudioUrl(responseText, { lang: 'en', slow: false });
+                        const audioMedia = await MessageMedia.fromUrl(ttsUrl, { unsafeMime: true });
+                        await client.sendMessage(msg.from, audioMedia, { sendAudioAsVoice: true });
+                        // We also send text for clarity (Optional, but good UX)
+                        // await msg.reply(responseText); 
+                    } catch (e) {
+                        console.error("TTS Error:", e);
+                        await msg.reply(responseText); // Fallback to text
+                    }
+                } else {
+                    await msg.reply(responseText);
                 }
-            } else {
-                await msg.reply(responseText);
             }
+        } catch (err) {
+            if (err.message && err.message.includes("429")) rotateKey();
+            else console.error("⚠️ AI Logic Error:", err);
         }
-    } catch (err) {
-        if (err.message.includes("429")) rotateKey();
+    } catch (sysErr) {
+        console.error("🔥 FATAL MESSAGE ERROR:", sysErr);
     }
 }
 
