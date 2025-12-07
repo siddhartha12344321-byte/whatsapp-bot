@@ -36,6 +36,7 @@ const indexName = 'whatsapp-bot';
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb+srv://amurag12344321_db_user:78mbO8WPw69AeTpt@siddharthawhatsappbot.wfbdgjf.mongodb.net/?appName=SiddharthaWhatsappBot";
 const PINECONE_API_KEY = process.env.PINECONE_API_KEY || 'pcsk_4YGs7G_FB4bw1RbEejhHeiwEeL8wrU2vS1vQfFS2TcdhxJjsrehCHMyeFtHw4cHJkWPZvc';
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || 'sk-yyidxx41e0c3b87c4a5be61bff3e3f02'; // DeepSeek-VL for image analysis
 
 // Validate API Keys on startup
 console.log("🔑 Checking required API keys...");
@@ -44,6 +45,9 @@ if (!GROQ_API_KEY) {
 }
 if (!PINECONE_API_KEY) {
     console.warn("⚠️ PINECONE_API_KEY not set in environment - some features may not work");
+}
+if (!DEEPSEEK_API_KEY) {
+    console.warn("⚠️ DEEPSEEK_API_KEY not set - image analysis may not work");
 }
 
 // --- CONNECTIONS ---
@@ -194,10 +198,11 @@ async function updateHistory(chatId, role, text, userId = null) {
         return; // Don't save empty messages
     }
 
-    // Update in-memory cache (for immediate use)
+    // Update in-memory cache (for immediate use) - Use Groq-compatible format
     if (!chatHistory.has(chatId)) chatHistory.set(chatId, []);
     const history = chatHistory.get(chatId);
-    history.push({ role, parts: [{ text: cleanText }] });
+    // Store in Groq format: { role, content } instead of { role, parts }
+    history.push({ role, content: cleanText });
     if (history.length > 20) history.shift(); // Keep last 20 turns in memory
 
     // Save to MongoDB for persistence (async, don't wait)
@@ -228,6 +233,88 @@ async function updateHistory(chatId, role, text, userId = null) {
         upsertToPinecone(memoryText, memoryId).catch(err =>
             console.error("Error saving to Pinecone:", err.message || err)
         );
+    }
+}
+
+// Helper: Ensure messages are in Groq format (not Gemini parts format)
+function normalizeMessagesForGroq(messages) {
+    return messages.map(msg => {
+        // If message has 'parts' property (old Gemini format), convert it
+        if (msg.parts && !msg.content) {
+            const partText = msg.parts.map(p => p.text || p.content || '').join('\n');
+            return {
+                role: msg.role,
+                content: partText
+            };
+        }
+        // If message is already in correct format, return as is
+        return {
+            role: msg.role,
+            content: msg.content || ''
+        };
+    }).filter(m => m.content && m.content.trim().length > 0); // Remove empty messages
+}
+
+// Helper: Analyze image using DeepSeek-VL
+async function analyzeImageWithDeepSeek(media) {
+    if (!DEEPSEEK_API_KEY) {
+        throw new Error("DeepSeek API key not configured");
+    }
+
+    try {
+        // Convert media data to base64 if not already
+        const base64Image = typeof media.data === 'string' ? media.data : Buffer.from(media.data).toString('base64');
+        const mimeType = media.mimetype || 'image/jpeg';
+
+        console.log("📡 Sending image to DeepSeek-VL for analysis...");
+
+        const response = await fetch('https://api.deepseek.com/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${DEEPSEEK_API_KEY}`
+            },
+            body: JSON.stringify({
+                model: 'deepseek-vl',
+                messages: [
+                    {
+                        role: 'user',
+                        content: [
+                            {
+                                type: 'text',
+                                text: 'Please analyze this image and describe its contents in detail. If it contains math problems, text, or diagrams, describe them clearly.'
+                            },
+                            {
+                                type: 'image_url',
+                                image_url: {
+                                    url: `data:${mimeType};base64,${base64Image}`
+                                }
+                            }
+                        ]
+                    }
+                ],
+                max_tokens: 1000
+            })
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            console.error("DeepSeek API error:", errorData);
+            throw new Error(`DeepSeek API error: ${response.status} - ${errorData?.error?.message || 'Unknown error'}`);
+        }
+
+        const data = await response.json();
+        const description = data.choices?.[0]?.message?.content;
+
+        if (!description) {
+            throw new Error("No image description received from DeepSeek");
+        }
+
+        console.log("✅ Image analysis successful");
+        return description;
+    } catch (err) {
+        console.error("❌ DeepSeek image analysis failed:", err.message);
+        throw err;
     }
 }
 
@@ -457,16 +544,38 @@ async function callWithFallback(fnGenerator) {
 }
 
 // Keep simple retry for Embeddings as they have only 1 model
+// Track failed embedding attempts to avoid spam
+let embeddingFailCount = 0;
+let lastEmbeddingErrorTime = 0;
+const EMBEDDING_ERROR_COOLDOWN = 30000; // 30 seconds
+
 async function callWithRetry(fn, retries = 0) { // Default 0 retries to avoid lag
     try {
+        embeddingFailCount = 0; // Reset on success
         return await fn();
     } catch (e) {
-        console.warn("Embedding Error (Fast Fail):", e.message);
+        embeddingFailCount++;
+        const now = Date.now();
+        
+        // Only log embedding errors once per cooldown period to avoid spam
+        if (now - lastEmbeddingErrorTime > EMBEDDING_ERROR_COOLDOWN) {
+            if (e.message?.includes('429') || e.message?.includes('quota')) {
+                console.warn("⚠️ Gemini API Quota Exceeded - Bot continuing without embeddings");
+            } else {
+                console.warn("⚠️ Embedding Error (Fast Fail):", e.message?.substring(0, 80));
+            }
+            lastEmbeddingErrorTime = now;
+        }
         throw e;
     }
 }
 
 async function getEmbedding(text) {
+    // Disable embeddings if Gemini quota is exhausted
+    if (embeddingFailCount > 3) {
+        return null; // Return null instead of trying, avoids spam
+    }
+    
     try {
         return await callWithRetry(async () => {
             if (!genAI) rotateKey();
@@ -475,31 +584,51 @@ async function getEmbedding(text) {
             return result.embedding.values;
         });
     } catch (e) {
-        console.error("Embedding Error (Final):", e.message);
-        return null; // Fail gracefully
+        // Silent fail on quota exceeded - don't spam logs
+        if (!e.message?.includes('429')) {
+            console.error("⚠️ Embedding Error (will retry later):", e.message?.substring(0, 80));
+        }
+        return null; // Fail gracefully without throwing
     }
 }
 
 async function upsertToPinecone(text, id) {
-    const vector = await getEmbedding(text);
-    if (!vector) return;
+    // Skip if Pinecone not available
+    if (!pc) return;
+    
     try {
+        const vector = await getEmbedding(text);
+        if (!vector) return; // Silently skip if embedding failed
+        
         const index = pc.index(indexName);
         await index.upsert([{ id: id, values: vector, metadata: { text: text.substring(0, 2000) } }]);
-    } catch (e) { console.error("Pinecone Upsert Error:", e); }
+    } catch (e) { 
+        // Only log Pinecone errors occasionally to avoid spam
+        if (Math.random() < 0.1) { // Log 10% of errors
+            console.warn("⚠️ Memory store error - continuing without persistence");
+        }
+    }
 }
 
 async function queryPinecone(queryText) {
+    // Skip if Pinecone not available
+    if (!pc) return null;
+    
     try {
-        const index = pc.index(indexName);
         const vector = await getEmbedding(queryText);
-        if (!vector) return null; // Embedding failed
+        if (!vector) return null; // Embedding failed, skip gracefully
 
+        const index = pc.index(indexName);
         const queryResponse = await index.query({ vector: vector, topK: 3, includeMetadata: true });
         if (queryResponse.matches.length > 0) {
             return queryResponse.matches.filter(m => m.score > 0.5).map(m => m.metadata.text).join("\n\n");
         }
-    } catch (e) { console.error("Pinecone Query Error:", e); }
+    } catch (e) { 
+        // Silently fail - embeddings/Pinecone optional
+        if (Math.random() < 0.05) { // Log only 5% to avoid spam
+            console.warn("⚠️ Memory retrieval skipped - continuing without context");
+        }
+    }
     return null;
 }
 // Enhanced function to extract text from PDF for topic filtering
@@ -1033,7 +1162,7 @@ Keep it SHORT, CLEAR, EASY TO READ. No long paragraphs!`
                 const context = await queryPinecone(fullPrompt);
 
                 try {
-                    const chatSession = await quizEngine.chat([
+                    const messagesArray = [
                         {
                             role: "system",
                             content: `You are an exam tutor. CRITICAL RULES:
@@ -1055,8 +1184,10 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                             role: "user",
                             content: context ? `Relevant context from study materials:\n${context}\n\n${fullPrompt}` : fullPrompt
                         },
-                        ...(chatHistory.get(chat.id._serialized) || [])
-                    ]);
+                        ...normalizeMessagesForGroq(chatHistory.get(chat.id._serialized) || [])
+                    ];
+
+                    const chatSession = await quizEngine.chat(messagesArray);
 
                     explanation = chatSession.response.text();
                 } catch (e) { console.error("Groq Explainer Error:", e); throw e; }
@@ -1166,6 +1297,31 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
         if (msg.hasMedia) {
             const media = await msg.downloadMedia();
             console.log(`📎 Media received: ${media.mimetype}, prompt: ${prompt.substring(0, 50)}`);
+
+            // Handle images - describe them since Groq doesn't support vision
+            if (media.mimetype.startsWith('image/')) {
+                console.log("🖼️ Image detected - analyzing with DeepSeek-VL...");
+                try {
+                    const imageDescription = await analyzeImageWithDeepSeek(media);
+                    console.log("📸 Image analysis complete");
+                    
+                    // Use the image description as additional context
+                    const enhancedPrompt = `Image content: ${imageDescription}\n\nUser request: ${prompt}`;
+                    
+                    // Send to AI with enhanced context
+                    const response = await quizEngine.chat(enhancedPrompt, normalizeMessagesForGroq(chatHistory.get(chatId) || []));
+                    if (response) {
+                        updateHistory(chatId, 'user', enhancedPrompt);
+                        updateHistory(chatId, 'assistant', response);
+                        await msg.reply(response);
+                    }
+                    return;
+                } catch (err) {
+                    console.error("❌ Image analysis failed:", err.message);
+                    await msg.reply("❌ Could not analyze image. Please describe it or try again.");
+                    return;
+                }
+            }
 
             // Priority 1: PDF Quiz Generation
             if (media.mimetype === 'application/pdf' && (
@@ -1461,11 +1617,13 @@ Guidelines:
 
 Don't force a rigid format - adapt to the question type naturally.`;
 
-            const chatSession = await quizEngine.chat([
+            const messagesArray = [
                 { role: "system", content: systemPrompt },
                 { role: "user", content: context ? `Relevant context:\n${context}\n\nUser's question: ${enhancedPrompt}` : enhancedPrompt },
-                ...(chatHistory.get(chat.id._serialized) || [])
-            ]);
+                ...normalizeMessagesForGroq(chatHistory.get(chat.id._serialized) || [])
+            ];
+
+            const chatSession = await quizEngine.chat(messagesArray);
 
             responseText = chatSession.response.text();
             console.log(`✅ Groq response generated successfully`);
@@ -1501,7 +1659,16 @@ Don't force a rigid format - adapt to the question type naturally.`;
         // Only format MCQs/polls in UPSC style, send others as-is
         if (isMCQ || isPollReply) {
             const formattedResponse = formatExamTutorResponse(null, responseText, isPollReply);
-            await msg.reply(formattedResponse);
+            try {
+                await msg.reply(formattedResponse);
+            } catch (sendErr) {
+                console.error("⚠️ Failed to send formatted reply:", sendErr.message?.substring(0, 80));
+                try {
+                    await msg.reply("✅ Analysis complete (reply format failed)");
+                } catch (fallbackErr) {
+                    console.error("⚠️ Fallback reply also failed - browser connection may be unstable");
+                }
+            }
         } else {
             // Send natural response for general questions
             if (isVoice) {
@@ -1509,16 +1676,33 @@ Don't force a rigid format - adapt to the question type naturally.`;
                     const url = googleTTS.getAudioUrl(responseText, { lang: 'en', slow: false });
                     const media = await MessageMedia.fromUrl(url, { unsafeMime: true });
                     await client.sendMessage(msg.from, media, { sendAudioAsVoice: true });
-                } catch (e) { await msg.reply(responseText); }
+                } catch (voiceErr) { 
+                    try {
+                        await msg.reply(responseText);
+                    } catch (textErr) {
+                        console.error("⚠️ Failed to send voice and text reply - connection unstable");
+                    }
+                }
             } else {
-                await msg.reply(responseText);
+                try {
+                    await msg.reply(responseText);
+                } catch (sendErr) {
+                    console.error("⚠️ Failed to send text reply:", sendErr.message?.substring(0, 80));
+                    if (sendErr.message?.includes("Target closed")) {
+                        console.log("⚠️ Browser connection lost - bot will recover on next message");
+                    }
+                }
             }
         }
-        console.log("✅ Reply Sent.");
+        console.log("✅ Reply attempt completed.");
 
     } catch (e) {
-        console.error("🔥 FATAL MSG ERROR:", e);
+        console.error("🔥 FATAL MSG ERROR:", e.message?.substring(0, 100));
+        if (e.message?.includes("Target closed")) {
+            console.warn("⚠️ Puppeteer browser crashed - will restart on next message");
+        }
     }
+}
 }
 
 // --- INITIALIZATION ---
@@ -1537,7 +1721,6 @@ async function startClient() {
         console.log('⚠️ Continuing without MongoDB - some features may be limited');
     });
 
-    console.log('🔄 Initializing WhatsApp Client...');
     let store;
     try {
         store = new MongoStore({ mongoose: mongoose });
@@ -1577,17 +1760,18 @@ async function startClient() {
         client.on('qr', (qr) => {
             qrCodeData = qr;
             qrcode.generate(qr, { small: true });
-            console.log("⚡ SCAN QR CODE TO CONNECT");
+            console.log("⚡ SCAN QR CODE TO CONNECT - QR Code displayed in browser at /qr");
         });
 
         client.on('ready', () => {
             console.log("✅✅✅ BOT IS READY! ✅✅✅");
             console.log("✅ WhatsApp Connected Successfully");
+            console.log(`✅ Bot Name: ${client.info?.pushname || 'Unknown'}`);
             qrCodeData = "";
         });
 
         client.on('authenticated', () => {
-            console.log("🔐 Authentication successful");
+            console.log("🔐 Authentication successful - Session restored/created");
         });
 
         client.on('auth_failure', (msg) => {
@@ -1596,17 +1780,33 @@ async function startClient() {
 
         client.on('disconnected', (reason) => {
             console.log("⚠️ Client disconnected:", reason);
+            console.log("⚠️ Attempting to reconnect...");
         });
 
         client.on('vote_update', (vote) => quizEngine.handleVote(vote));
         client.on('message', handleMessage);
         client.on('remote_session_saved', () => console.log('💾 Session saved to database'));
 
-        console.log('🔄 Initializing WhatsApp client...');
-        await client.initialize();
-        console.log('✅ Client initialization complete');
+        console.log('🔄 Initializing WhatsApp connection (this may take 30-60 seconds on first run)...');
+        
+        // Initialize with timeout for better UX
+        const initPromise = client.initialize();
+        const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Initialization timeout after 120 seconds')), 120000)
+        );
+
+        try {
+            await Promise.race([initPromise, timeoutPromise]);
+            console.log('✅ Client initialization complete - Bot is ready!');
+        } catch (timeoutErr) {
+            console.error('❌ Initialization timeout:', timeoutErr.message);
+            throw timeoutErr;
+        }
     } catch (err) {
-        console.error('❌ Failed to initialize WhatsApp client:', err);
+        console.error('❌ Failed to initialize WhatsApp client:', err.message);
+        if (err.message.includes('Timeout')) {
+            console.error('💡 Possible causes: Browser/Network issue, Invalid auth session');
+        }
         throw err;
     }
 }
@@ -1621,9 +1821,31 @@ process.on('uncaughtException', (error) => {
     process.exit(1);
 });
 
-console.log("🚀 WhatsApp Bot Starting...");
+// Startup sequence
+console.log("\n" + "=".repeat(50));
+console.log("🤖 WhatsApp Bot Initialization Starting...");
+console.log("=".repeat(50) + "\n");
+
+console.log("📋 Startup Sequence:");
+console.log("1️⃣  Checking API keys...");
+console.log("2️⃣  Initializing services...");
+console.log("3️⃣  Connecting to MongoDB...");
+console.log("4️⃣  Starting Express server (port 3000)...");
+console.log("5️⃣  Initializing WhatsApp client...");
+console.log("6️⃣  Waiting for authentication...\n");
+
+console.log("🚀 Starting bot...\n");
+
 startClient().catch(err => {
-    console.error("🚀 Failed to start bot:", err);
+    console.error("\n" + "=".repeat(50));
+    console.error("❌ FATAL: Bot failed to start");
+    console.error("=".repeat(50));
+    console.error("Error:", err.message);
+    console.error("\n💡 Troubleshooting:");
+    console.error("- Check API keys in environment variables");
+    console.error("- Verify MongoDB connection");
+    console.error("- Try running: node debug.js");
+    console.error("- Check network connectivity\n");
     process.exit(1);
 });
 
