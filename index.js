@@ -161,7 +161,8 @@ async function callWithRetry(fn, retries = 3) {
 async function getEmbedding(text) {
     try {
         return await callWithRetry(async () => {
-            const model = getModel(); // Get fresh model (maybe updated key)
+            if (!genAI) rotateKey();
+            const model = genAI.getGenerativeModel({ model: "text-embedding-004" });
             const result = await model.embedContent(text);
             return result.embedding.values;
         });
