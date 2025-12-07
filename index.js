@@ -1458,7 +1458,11 @@ async function startClient() {
     try {
         client = new Client({
             authStrategy: store ? new RemoteAuth({ store: store, backupSyncIntervalMs: 60000 }) : new LocalAuth(),
-            puppeteer: puppetConfig
+            puppeteer: puppetConfig,
+            webVersionCache: {
+                type: 'remote',
+                remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
+            }
         });
 
         client.on('qr', (qr) => {
