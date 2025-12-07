@@ -18,7 +18,8 @@
     "pdf-parse": "^1.1.1",
     "mongoose": "^8.0.0",
     "@pinecone-database/pinecone": "^2.2.0",
-    "google-tts-api": "^2.0.2"
+    "google-tts-api": "^2.0.2",
+    "wwebjs-mongo": "^1.1.0"
   },
   "engines": {
     "node": ">=18.0.0"
