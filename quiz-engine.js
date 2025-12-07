@@ -49,11 +49,11 @@ class QuizEngine {
 
         // Models Configuration
         // Note: Groq is fast, so we mainly use the best model.
-        // Fallbacks can be standard Llama 3 8b if 70b is busy.
+        // Updated to latest supported models (Dec 2025)
         this.MODELS = [
-            "llama3-70b-8192",
-            "llama3-8b-8192",
-            "mixtral-8x7b-32768"
+            "llama-3.3-70b-versatile",
+            "llama-3.1-8b-instant",
+            "gemma2-9b-it"
         ];
     }
 

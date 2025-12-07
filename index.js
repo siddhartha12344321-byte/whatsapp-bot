@@ -423,24 +423,13 @@ async function callWithFallback(fnGenerator) {
 }
 
 // Keep simple retry for Embeddings as they have only 1 model
-async function callWithRetry(fn, retries = 3) {
-    for (let i = 0; i < retries; i++) {
-        try {
-            return await fn();
-        } catch (e) {
-            if (isQuotaError(e)) {
-                console.log(`⏳ Embedding quota error, attempt ${i + 1}/${retries}`);
-                rotateKey();
-                const retryDelay = extractRetryDelay(e);
-                const backoffDelay = Math.max(retryDelay * 1000, 2000 * (i + 1));
-                console.log(`⏰ Waiting ${backoffDelay / 1000}s before retry...`);
-                await sleep(backoffDelay);
-            } else {
-                throw e;
-            }
-        }
+async function callWithRetry(fn, retries = 0) { // Default 0 retries to avoid lag
+    try {
+        return await fn();
+    } catch (e) {
+        console.warn("Embedding Error (Fast Fail):", e.message);
+        throw e;
     }
-    throw new Error("Max retries exceeded for embeddings.");
 }
 
 async function getEmbedding(text) {
