@@ -1374,7 +1374,8 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                             }
                             // Ensure minimum 5 seconds and maximum 300 seconds (5 minutes)
                             timer = Math.max(5, Math.min(300, timer));
-                        break;
+                            break;
+                        }
                     }
                 }
 
