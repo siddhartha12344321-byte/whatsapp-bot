@@ -14,89 +14,219 @@
 
         body {
             font-family: 'Segoe UI', Tahoma, sans-serif;
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            background: linear-gradient(135deg, #0f0c29 0%, #302b63 50%, #24243e 100%);
             min-height: 100vh;
             color: #fff;
+            overflow-x: hidden;
+        }
+
+        /* Animated background */
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background:
+                radial-gradient(circle at 20% 80%, rgba(0, 255, 136, 0.1) 0%, transparent 50%),
+                radial-gradient(circle at 80% 20%, rgba(120, 0, 255, 0.1) 0%, transparent 50%),
+                radial-gradient(circle at 40% 40%, rgba(255, 153, 0, 0.05) 0%, transparent 40%);
+            z-index: -1;
+            animation: pulse 8s ease-in-out infinite alternate;
+        }
+
+        @keyframes pulse {
+            0% {
+                opacity: 0.5;
+                transform: scale(1);
+            }
+
+            100% {
+                opacity: 1;
+                transform: scale(1.1);
+            }
+        }
+
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes glow {
+
+            0%,
+            100% {
+                box-shadow: 0 0 20px rgba(0, 255, 136, 0.3);
+            }
+
+            50% {
+                box-shadow: 0 0 40px rgba(0, 255, 136, 0.6);
+            }
         }
 
         .header {
             text-align: center;
-            padding: 20px;
-            background: rgba(0, 0, 0, 0.3);
+            padding: 30px 20px;
+            background: rgba(0, 0, 0, 0.4);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
         }
 
         .header h1 {
-            font-size: 2rem;
-            color: #00ff88;
+            font-size: 2.5rem;
+            background: linear-gradient(90deg, #00ff88, #00cc6a, #00ff88);
+            background-size: 200% auto;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            animation: shimmer 3s linear infinite;
+            font-weight: 800;
+            letter-spacing: 1px;
+        }
+
+        @keyframes shimmer {
+            0% {
+                background-position: 0% center;
+            }
+
+            100% {
+                background-position: 200% center;
+            }
+        }
+
+        .header p {
+            color: rgba(255, 255, 255, 0.7);
+            margin-top: 8px;
+            font-size: 1.1rem;
         }
 
         .creators-grid {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
-            gap: 20px;
-            padding: 20px;
+            gap: 25px;
+            padding: 30px;
             max-width: 1200px;
             margin: 0 auto;
         }
 
         .creator-card {
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 15px;
-            padding: 20px;
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+            border-radius: 20px;
+            padding: 30px 20px;
             text-align: center;
             cursor: pointer;
-            transition: all 0.3s;
-            border: 2px solid transparent;
+            transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            animation: fadeInUp 0.6s ease-out backwards;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .creator-card:nth-child(1) {
+            animation-delay: 0.1s;
+        }
+
+        .creator-card:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+
+        .creator-card:nth-child(3) {
+            animation-delay: 0.3s;
+        }
+
+        .creator-card:nth-child(4) {
+            animation-delay: 0.4s;
+        }
+
+        .creator-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
+            transition: left 0.5s;
+        }
+
+        .creator-card:hover::before {
+            left: 100%;
         }
 
         .creator-card:hover {
-            transform: translateY(-5px);
+            transform: translateY(-10px) scale(1.02);
             border-color: #00ff88;
-            background: rgba(255, 255, 255, 0.15);
+            background: rgba(0, 255, 136, 0.1);
+            box-shadow: 0 20px 40px rgba(0, 255, 136, 0.2);
         }
 
         .creator-card h2 {
-            color: #00ff88;
-            margin-bottom: 10px;
-            font-size: 1.5rem;
+            color: #fff;
+            margin: 15px 0 8px 0;
+            font-size: 1.4rem;
+            font-weight: 700;
+            letter-spacing: 1px;
         }
 
         .creator-card p {
-            color: #aaa;
+            color: rgba(255, 255, 255, 0.6);
             font-size: 0.9rem;
         }
 
         .creator-card .quiz-count {
-            background: #00ff88;
+            background: linear-gradient(135deg, #00ff88, #00cc6a);
             color: #000;
-            padding: 5px 15px;
-            border-radius: 20px;
+            padding: 8px 20px;
+            border-radius: 25px;
             display: inline-block;
-            margin-top: 10px;
+            margin-top: 15px;
             font-weight: bold;
+            font-size: 0.85rem;
+            box-shadow: 0 4px 15px rgba(0, 255, 136, 0.3);
         }
 
         .btn {
-            background: linear-gradient(90deg, #00ff88, #00cc6a);
+            background: linear-gradient(135deg, #00ff88, #00cc6a);
             color: #000;
             border: none;
-            padding: 15px 30px;
-            border-radius: 25px;
+            padding: 15px 35px;
+            border-radius: 30px;
             font-size: 1rem;
             cursor: pointer;
             font-weight: bold;
-            transition: all 0.3s;
+            transition: all 0.3s ease;
             margin-top: 15px;
+            box-shadow: 0 4px 20px rgba(0, 255, 136, 0.3);
+            text-transform: uppercase;
+            letter-spacing: 1px;
         }
 
         .btn:hover {
-            transform: scale(1.05);
-            box-shadow: 0 5px 20px rgba(0, 255, 136, 0.4);
+            transform: translateY(-3px);
+            box-shadow: 0 8px 30px rgba(0, 255, 136, 0.5);
+        }
+
+        .btn:active {
+            transform: translateY(0);
         }
 
         @media (max-width: 768px) {
             .creators-grid {
                 grid-template-columns: 1fr;
+                padding: 15px;
+            }
+
+            .header h1 {
+                font-size: 1.8rem;
             }
         }
 
@@ -147,12 +277,18 @@
 
         /* Creator profile images */
         .creator-img {
-            width: 80px;
-            height: 80px;
+            width: 90px;
+            height: 90px;
             border-radius: 50%;
             object-fit: cover;
             border: 3px solid #00ff88;
-            margin-bottom: 10px;
+            box-shadow: 0 0 20px rgba(0, 255, 136, 0.4);
+            transition: all 0.3s ease;
+        }
+
+        .creator-card:hover .creator-img {
+            transform: scale(1.1);
+            box-shadow: 0 0 30px rgba(0, 255, 136, 0.6);
         }
 
         input::placeholder,
@@ -249,22 +385,26 @@
         </div>
         <div class="creators-grid">
             <div class="creator-card" onclick="openCreatorPanel('SIDDHARTHA')">
-                <h2>👤 SIDDHARTHA</h2>
+                <img class="creator-img" src="/public/siddhartha.jpg" alt="SIDDHARTHA">
+                <h2>SIDDHARTHA</h2>
                 <p>Create and manage your quizzes</p>
                 <span class="quiz-count" id="count-SIDDHARTHA">0 quizzes</span>
             </div>
             <div class="creator-card" onclick="openCreatorPanel('SAURABH')">
-                <h2>👤 SAURABH</h2>
+                <img class="creator-img" src="/public/saurabh.jpg" alt="SAURABH">
+                <h2>SAURABH</h2>
                 <p>Create and manage your quizzes</p>
                 <span class="quiz-count" id="count-SAURABH">0 quizzes</span>
             </div>
             <div class="creator-card" onclick="openCreatorPanel('VIKAS')">
-                <h2>👤 VIKAS</h2>
+                <img class="creator-img" src="/public/vikas.png" alt="VIKAS">
+                <h2>VIKAS</h2>
                 <p>Create and manage your quizzes</p>
                 <span class="quiz-count" id="count-VIKAS">0 quizzes</span>
             </div>
             <div class="creator-card" onclick="openCreatorPanel('GAURAV')">
-                <h2>👤 GAURAV</h2>
+                <img class="creator-img" src="/public/gaurav.png" alt="GAURAV">
+                <h2>GAURAV</h2>
                 <p>Create and manage your quizzes</p>
                 <span class="quiz-count" id="count-GAURAV">0 quizzes</span>
             </div>

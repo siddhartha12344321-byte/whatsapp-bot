@@ -633,11 +633,11 @@ async function deployQuizToGroup(quizId, groupId) {
         const quiz = await WebQuiz.findById(quizId);
         if (!quiz || !client) return;
 
-        // Convert web quiz format to QuizEngine format
+        // Convert web quiz format to QuizEngine format (must use correct_index)
         const questions = quiz.questions.map((q, i) => ({
             question: q.question,
             options: q.options,
-            correct: q.correctIndex,
+            correct_index: q.correctIndex,  // QuizEngine uses correct_index not correct
             explanation: q.explanation
         }));
 
