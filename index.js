@@ -1703,7 +1703,6 @@ Don't force a rigid format - adapt to the question type naturally.`;
         }
     }
 }
-}
 
 // --- INITIALIZATION ---
 async function startClient() {
