@@ -182,7 +182,15 @@ async function generateQuizFromPdfBuffer({ pdfBuffer, topic = 'General', qty = 1
 
     const model = getModel();
     const contentParts = [{ text: finalPrompt }, { inlineData: { data: pdfBuffer.toString('base64'), mimeType: 'application/pdf' } }];
-    const result = await model.generateContent(contentParts);
+    let result;
+    try {
+        result = await callWithRetry(async () => {
+            const currentModel = getModel();
+            return await currentModel.generateContent(contentParts);
+        });
+    } catch (e) { throw new Error("AI Overloaded (429) during Quiz Gen."); }
+
+    // const result = await model.generateContent(contentParts); // Replaced
     const jsonMatch = result.response.text().match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error("No JSON found");
     const data = JSON.parse(jsonMatch[0]);
