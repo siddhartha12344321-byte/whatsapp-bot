@@ -352,50 +352,30 @@ async function queryPinecone(queryText) {
                 const isTagged = msg.mentionedIds.includes(client.info.wid._serialized) || msg.body.includes("@");
                 const hasSession = quizSessions.has(chat.id._serialized);
                 if (!isTagged) {
-                    if (!hasSession) return;
-                    // If session, only accept votes (A-D, 1-4) or Stop
-                    if (!msg.body.trim().match(/^[a-dA-D1-4]$/) && !msg.body.toLowerCase().includes("stop")) return;
+                    if (!hasSession) { console.log("⛔ Gatekeeper: Ignore Group msg (No Tag/Session)"); return; }
+                    if (!msg.body.trim().match(/^[a-dA-D1-4]$/) && !msg.body.toLowerCase().includes("stop")) {
+                        console.log("⛔ Gatekeeper: Ignore Group msg (Invalid Input)"); return;
+                    }
                 }
             }
+            console.log("✅ Gatekeeper Passed");
 
             let prompt = sanitizeHtml(msg.body.replace(/@\S+/g, "").trim());
             const user = await updateUserProfile(msg.from, msg._data.notifyName);
 
-            // TEXT VOTING FALLBACK
-            const letterMatch = prompt.match(/^\s*([A-Da-d1-4])\s*$/);
-            if (letterMatch && quizSessions.has(chat.id._serialized)) {
-                // Logic to handle text vote... simplified for brevity, assume poll is preferred
-                // But we can implement if needed. 
-            }
+            if (prompt.toLowerCase().startsWith("draw ")) return await handleImageGeneration(msg, prompt.replace("draw ", ""));
+            if (prompt.toLowerCase().startsWith("search ")) return await handleWebSearch(msg, prompt.replace("search ", ""));
 
-            if (prompt.toLowerCase() === "stop quiz") {
-                if (quizSessions.has(chat.id._serialized)) { quizSessions.delete(chat.id._serialized); await msg.reply("🛑 Stopped."); }
-                return;
-            }
-
-            // --- COMMANDS ---
-            if (prompt.toLowerCase().startsWith("draw ")) {
-                return await handleImageGeneration(msg, prompt.replace("draw ", ""));
-            }
-            if (prompt.toLowerCase().startsWith("search ")) {
-                return await handleWebSearch(msg, prompt.replace("search ", ""));
-            }
-
-            // --- QUIZ & AI ---
-            // TRAINING MODE
             if (msg.hasMedia && prompt.toLowerCase().includes("learn")) {
                 await msg.reply("🧠 Memorizing...");
                 try {
                     const media = await msg.downloadMedia();
                     let text = "";
                     if (media.mimetype === 'application/pdf') {
-                        // Vision or Extract
-                        // For now use buffer if needed, but here we assume simple text
                         const data = await pdfParse(Buffer.from(media.data, 'base64'));
                         text = data.text;
-                    } else if (media.mimetype === 'text/plain') {
-                        text = Buffer.from(media.data, 'base64').toString('utf-8');
-                    }
+                    } else if (media.mimetype === 'text/plain') text = Buffer.from(media.data, 'base64').toString('utf-8');
+
                     if (text) {
                         await upsertToPinecone(text, "UserUpload_" + Date.now());
                         await msg.reply("✅ Memorized.");
@@ -404,18 +384,14 @@ async function queryPinecone(queryText) {
                 return;
             }
 
-            // QUIZ GENERATION
             if (msg.hasMedia && prompt.toLowerCase().includes("quiz")) {
-                // PDF Logic
                 const media = await msg.downloadMedia();
                 if (media.mimetype === 'application/pdf') {
                     await msg.reply("📄 Reasoning from PDF...");
                     const pdfBuffer = Buffer.from(media.data, 'base64');
-
                     let timer = 30;
                     const timeMatch = prompt.match(/every (\d+)\s*(s|m)/);
                     if (timeMatch) timer = parseInt(timeMatch[1]) * (timeMatch[2] == 'm' ? 60 : 1);
-
                     const questions = await generateQuizFromPdfBuffer({ pdfBuffer, topic: "PDF Content", qty: 10 });
                     quizSessions.set(chat.id._serialized, { questions, index: 0, timer, active: true, scores: new Map(), creditedVotes: new Set(), topic: "PDF" });
                     runQuizStep(chat, chat.id._serialized);
@@ -423,13 +399,9 @@ async function queryPinecone(queryText) {
                 }
             }
 
-            // INFINITE QUIZ / DAILY POLLS
             if (prompt.toLowerCase().includes("daily polls") || (prompt.toLowerCase().includes("quiz") && !msg.hasMedia)) {
-                // Logic to start simple quiz
-                // For brevity, using simple generator or tavily
+                if (quizSessions.has(chat.id._serialized)) { await msg.reply("Quiz already active."); return; }
                 await msg.reply("🎲 Starting General Quiz...");
-                // You'd call Generation Logic here.
-                // Implemented simple:
                 const questions = [
                     { question: "What is the capital of India?", options: ["Mumbai", "Delhi", "Chennai", "Kolkata"], correct_index: 1, answer_explanation: "New Delhi is the capital." },
                     { question: "2 + 2 = ?", options: ["3", "4", "5", "6"], correct_index: 1, answer_explanation: "Math." }
@@ -439,17 +411,17 @@ async function queryPinecone(queryText) {
                 return;
             }
 
-            // CHAT / VOICE
             const isVoice = msg.type === 'ptt' || msg.type === 'audio' || prompt.includes("speak");
 
-            // RAG + GEMINI
-            // RAG + GEMINI
+            console.log("🔍 Starting RAG retrieval...");
             const context = await queryPinecone(prompt);
+            console.log("📚 RAG Context retrieved. Starting Hydra...");
 
             let responseText = "";
             try {
                 await callWithFallback(async (modelName) => {
                     if (!genAI) rotateKey();
+                    console.log(`🤖 Hydra Trying: ${modelName}`);
                     const model = genAI.getGenerativeModel({ model: modelName });
                     const chatSession = model.startChat({
                         history: [
@@ -460,6 +432,7 @@ async function queryPinecone(queryText) {
                     const finalPrompt = context ? `Context: ${context}\nUser: ${prompt}` : prompt;
                     const result = await chatSession.sendMessage(finalPrompt);
                     responseText = result.response.text();
+                    console.log(`✅ Hydra Success with: ${modelName}`);
                 });
             } catch (err) {
                 console.error("🔥 All Models Failed:", err);
@@ -467,6 +440,7 @@ async function queryPinecone(queryText) {
                 return;
             }
 
+            console.log("📤 Sending Reply...");
             updateHistory(chat.id._serialized, "user", prompt);
             updateHistory(chat.id._serialized, "model", responseText);
 
@@ -479,6 +453,7 @@ async function queryPinecone(queryText) {
             } else {
                 await msg.reply(responseText);
             }
+            console.log("✅ Reply Sent.");
 
         } catch (e) {
             console.error("🔥 FATAL MSG ERROR:", e);
