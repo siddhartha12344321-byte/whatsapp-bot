@@ -612,6 +612,51 @@ app.post('/api/quiz/deploy/:id', async (req, res) => {
     }
 });
 
+// API: Manually trigger report card for a quiz
+app.post('/api/quiz/report/:id', async (req, res) => {
+    try {
+        const quiz = await WebQuiz.findById(req.params.id);
+        if (!quiz) return res.json({ success: false, error: 'Quiz not found' });
+        if (!quiz.targetGroup) return res.json({ success: false, error: 'No target group for this quiz' });
+
+        const chat = await client.getChatById(quiz.targetGroup);
+        if (!chat) return res.json({ success: false, error: 'Group not found' });
+
+        // Generate report card from quiz engine session or send a summary
+        const session = quizEngine.quizSessions.get(quiz.targetGroup);
+        if (session) {
+            // If session exists, send the report
+            await quizEngine.sendMockTestSummaryWithAnswers(chat, quiz.targetGroup);
+
+            // Also send rank list
+            let report = "🏆 *RANK LIST* 🏆\n*Subject:* " + (session.topic || quiz.title) + "\n──────────────────\n";
+            const sorted = [...session.scores.entries()].sort((a, b) => b[1] - a[1]);
+            if (sorted.length === 0) report += "No votes recorded.";
+            else sorted.forEach(([id, sc], i) => {
+                report += (i === 0 ? '🥇' : i === 1 ? '🥈' : '🥉') + " @" + id.split('@')[0] + " : " + sc + "/" + session.questions.length + "\n";
+            });
+            report += "──────────────────";
+            await chat.sendMessage(report, { mentions: sorted.map(s => s[0]) });
+        } else {
+            // No active session, send quiz summary only
+            let summary = "📊 *QUIZ SUMMARY*\n\n📝 *" + quiz.title + "*\n👤 Created by: " + quiz.creator + "\n\n";
+            quiz.questions.forEach((q, i) => {
+                summary += "*Q" + (i + 1) + ".* " + q.question + "\n✅ " + (q.options[q.correctIndex] || 'N/A') + "\n💡 " + (q.explanation || '') + "\n\n";
+            });
+            await chat.sendMessage(summary);
+        }
+
+        // Mark quiz as completed
+        quiz.status = 'completed';
+        await quiz.save();
+
+        res.json({ success: true });
+    } catch (e) {
+        console.error('Report error:', e);
+        res.json({ success: false, error: e.message });
+    }
+});
+
 // API: Get list of WhatsApp groups
 app.get('/api/groups', async (req, res) => {
     try {

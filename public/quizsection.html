@@ -508,8 +508,8 @@
                     style="margin-bottom: 20px; padding: 20px; background: linear-gradient(135deg, rgba(0,255,136,0.1), rgba(0,204,106,0.05)); border-radius: 12px; border: 1px solid rgba(0,255,136,0.3);">
                     <label style="font-size: 1.1rem; color: #00ff88; font-weight: bold;">2️⃣ Deploy Now
                         (Instant)</label>
-                    <p style="color: #888; font-size: 0.9rem; margin: 8px 0;">Sends all questions one-by-one with 30s
-                        timer</p>
+                    <p style="color: #888; font-size: 0.9rem; margin: 8px 0;">Sends all questions one-by-one with 3s
+                        interval</p>
                     <button class="btn" onclick="deployNow()" style="margin-top: 10px; width: 100%;">🚀 DEPLOY
                         NOW</button>
                 </div>
@@ -622,7 +622,11 @@
                         if (q.status === 'draft') {
                             actions += '<button class="btn" style="padding:5px 10px;margin-left:5px;" onclick="deployQuiz(\'' + q._id + '\')">🚀</button>';
                         }
-                        return '<div class="quiz-card"><div><h4>' + q.title + '</h4><small>' + q.questions.length + ' questions</small></div><div><span class="status ' + q.status + '">' + q.status.toUpperCase() + '</span> ' + actions + '</div></div>';
+                        // Show Report Card button for active quizzes with manual report
+                        if (q.status === 'active' && q.autoReportCard === false) {
+                            actions += '<button class="btn" style="padding:5px 10px;margin-left:5px;background:linear-gradient(135deg,#7c3aed,#5b21b6);" onclick="showReportCard(\'' + q._id + '\')">📊 Report</button>';
+                        }
+                        return '<div class="quiz-card"><div><h4>' + q.title + '</h4><small>' + q.questions.length + ' questions' + (q.autoReportCard === false ? ' | Manual Report' : '') + '</small></div><div><span class="status ' + q.status + '">' + q.status.toUpperCase() + '</span> ' + actions + '</div></div>';
                     }).join('');
                 })
                 .catch(() => {
@@ -736,7 +740,7 @@
                 questions: questions,
                 status: 'active',
                 targetGroup: group,
-                timer: 30,  // Default 30s for instant deploy
+                timer: 3,  // Default 3s for instant deploy
                 scheduledTime: null,
                 autoReportCard: autoReport
             };
@@ -840,6 +844,25 @@
                     }
                 })
                 .catch(e => alert('Deployment failed: ' + e.message));
+        }
+
+        function showReportCard(quizId) {
+            if (!confirm('Show Report Card for this quiz in WhatsApp group?')) return;
+            fetch('/api/quiz/report/' + quizId, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            })
+                .then(r => r.json())
+                .then(result => {
+                    if (result.success) {
+                        alert('📊 Report Card sent to WhatsApp group!');
+                        loadQuizzes();
+                    } else {
+                        alert('Error: ' + (result.error || 'Could not send report'));
+                    }
+                })
+                .catch(e => alert('Report failed: ' + e.message));
         }
 
         // Toggle switch label update
