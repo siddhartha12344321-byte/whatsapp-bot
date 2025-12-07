@@ -1311,8 +1311,26 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
         try {
             console.log(`🤖 Hydra Trying: Groq (Llama 3)`);
 
-            // Get user memories for context
-            const userMemories = await getUserMemories(chat.id._serialized, user.userId || chat.id._serialized.split('@')[0]);
+            // SPEED OPTIMIZATION: Race context retrieval against 1s timeout
+            // If memory takes too long, we skip it to reply fast.
+            const contextPromise = (async () => {
+                const [pineconeCtx, userMem] = await Promise.all([
+                    queryPinecone(prompt).catch(() => null),
+                    getUserMemories(chat.id._serialized, user.userId || chat.id._serialized.split('@')[0]).catch(() => null)
+                ]);
+                return { pineconeCtx, userMem };
+            })();
+
+            const timeoutPromise = new Promise(resolve => setTimeout(() => resolve({ pineconeCtx: null, userMem: null }), 1000));
+
+            const { pineconeCtx: ragContext, userMem: userMemories } = await Promise.race([contextPromise, timeoutPromise]);
+
+            // Combine all context
+            let contextParts = [];
+            if (ragContext) contextParts.push(`📚 Study Materials:\n${ragContext}`);
+            if (userMemories) contextParts.push(`👤 User Information:\n${userMemories}`);
+
+            const context = contextParts.length > 0 ? contextParts.join('\n\n') : null;
             const memoryContext = userMemories ? `\n\nRemember about this user: ${userMemories}` : '';
 
             // Enhance prompt based on question type
@@ -1331,7 +1349,7 @@ Format for MCQs/Polls:
 
 Be concise, clear, and exam-focused.${memoryContext}`
                 : `You are a helpful AI assistant. Be natural, conversational, and dynamic. 
-
+                
 Guidelines:
 - Answer naturally based on the question type
 - For general questions: Be friendly and helpful
