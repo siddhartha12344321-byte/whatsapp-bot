@@ -1053,6 +1053,82 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
         if (prompt.toLowerCase().startsWith("draw ")) return await handleImageGeneration(msg, prompt.replace("draw ", ""));
         if (prompt.toLowerCase().startsWith("search ")) return await handleWebSearch(msg, prompt.replace("search ", ""));
 
+        // Priority 1: Topic Quiz Generation (Text-based)
+        if (prompt.match(/\b(create|generate|make|start)\s+(?:a\s+)?(?:mock\s+)?(?:test|quiz|poll)/i) && !msg.hasMedia) {
+            await msg.reply("🧠 Analyzing request and generating quiz...");
+
+            // 1. Parse Timer
+            let timer = 30; // default 30 seconds
+            const timePatterns = [
+                /every\s+(\d+)\s*(second|sec|s|minute|min|m)/i,
+                /timer\s*[:=]\s*(\d+)\s*(second|sec|s|minute|min|m)/i,
+                /(\d+)\s*(second|sec|s|minute|min|m)\s*(?:timer|interval|per\s+question)/i,
+                /(\d+)\s*(?:s|sec|second|seconds)/i,
+                /(\d+)\s*(?:m|min|minute|minutes)/i
+            ];
+            for (const pattern of timePatterns) {
+                const match = prompt.match(pattern);
+                if (match) {
+                    const value = parseInt(match[1]);
+                    const unit = (match[2] || match[0]).toLowerCase();
+                    if (unit.includes('m') || unit.includes('min')) timer = value * 60;
+                    else timer = value;
+                    timer = Math.max(5, Math.min(300, timer));
+                    break;
+                }
+            }
+
+            // 2. Parse Quantity
+            let qty = 10; // default
+            const qtyMatch = prompt.match(/(\d+)\s*(?:questions?|q|qty|quantity)/i);
+            if (qtyMatch) qty = Math.max(1, Math.min(50, parseInt(qtyMatch[1])));
+
+            // 3. Parse Difficulty
+            let difficulty = 'medium';
+            if (prompt.match(/\b(easy|simple|beginner)\b/i)) difficulty = 'easy';
+            else if (prompt.match(/\b(hard|difficult|advanced|expert)\b/i)) difficulty = 'hard';
+
+            // 4. Extract Topic
+            let topic = "General Knowledge";
+            const topicPatterns = [
+                /topic\s+["']?([^"'\n]+)["']?/i,
+                /on\s+["']?([^"'\n]+)["']?/i,
+                /about\s+["']?([^"'\n]+)["']?/i,
+                /quiz\s+(?:on|about|for)\s+["']?([^"'\n]+)["']?/i
+            ];
+            for (const pattern of topicPatterns) {
+                const match = prompt.match(pattern);
+                if (match && match[1]) {
+                    topic = match[1].trim();
+                    // Clean up the extracted topic if it accidentally grabbed the "with 3 questions" part
+                    topic = topic.split(/\s+with\s+|\s+ensure\s+|\s+every\s+/i)[0].trim();
+                    break;
+                }
+            }
+
+            console.log(`🧠 Generating Topic Quiz: Topic="${topic}", Qty=${qty}, Timer=${timer}s`);
+
+            try {
+                const questions = await quizEngine.generateQuizFromTopic({
+                    topic,
+                    qty,
+                    difficulty
+                });
+
+                if (questions.length === 0) {
+                    await msg.reply(`❌ Could not generate questions for "${topic}". Please try a simpler topic.`);
+                    return;
+                }
+
+                await msg.reply(`✅ Generated ${questions.length} questions on "${topic}"\n⏱️ Timer: ${timer}s per question\n\n🎯 Starting quiz now!`);
+                quizEngine.startQuiz(chat, chat.id._serialized, questions, topic, timer);
+            } catch (e) {
+                console.error("Topic Quiz Error:", e);
+                await msg.reply(`❌ Quiz Generation Error: ${e.message}`);
+            }
+            return;
+        }
+
         // Handle media files (PDF, images, etc.)
         if (msg.hasMedia) {
             const media = await msg.downloadMedia();

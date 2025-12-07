@@ -14,27 +14,33 @@ class GroqClient {
     async chat(messages, model = "llama3-70b-8192", temperature = 0.7) {
         if (!this.apiKey) throw new Error("Groq API Key is missing");
 
-        const response = await fetch(this.baseUrl, {
-            method: "POST",
-            headers: {
-                "Authorization": `Bearer ${this.apiKey}`,
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                model: model,
-                messages: messages,
-                temperature: temperature,
-                response_format: { type: "json_object" } // Force JSON for stability
-            })
-        });
+        try {
+            const response = await fetch(this.baseUrl, {
+                method: "POST",
+                headers: {
+                    "Authorization": `Bearer ${this.apiKey}`,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    model: model,
+                    messages: messages,
+                    temperature: temperature,
+                    response_format: { type: "json_object" } // Force JSON for stability
+                })
+            });
 
-        if (!response.ok) {
-            const errText = await response.text();
-            throw new Error(`Groq API Error (${response.status}): ${errText}`);
+            if (!response.ok) {
+                const errText = await response.text();
+                console.error(`❌ Groq API Error [${model}]: ${response.status} - ${errText}`);
+                throw new Error(`Groq API Error (${response.status}): ${errText}`);
+            }
+
+            const data = await response.json();
+            return data.choices[0].message.content;
+        } catch (e) {
+            console.error(`❌ Groq Request Failed [${model}]:`, e.message);
+            throw e;
         }
-
-        const data = await response.json();
-        return data.choices[0].message.content;
     }
 }
 
@@ -66,12 +72,13 @@ class QuizEngine {
                 lastError = e;
                 console.warn(`⚠️ Model ${modelName} failed: ${e.message}. Retrying...`);
                 if (e.message?.includes('429')) {
-                    await sleep(2000); // Wait on rate limit
+                    await sleep(1000); // Wait on rate limit
                     continue;
                 }
                 if (modelName === this.MODELS[this.MODELS.length - 1]) break;
             }
         }
+        console.error("🚨 CRITICAL: All AI Models Failed. Last Error:", lastError);
         throw lastError || new Error("All models failed in QuizEngine");
     }
 
@@ -89,15 +96,6 @@ class QuizEngine {
     // --- GENERAL CHAT (New) ---
     async chat(messages) {
         return await this.callWithFallback(async (modelName) => {
-            // Adapt generic messages to Groq format if needed, but standard array works
-            // Remove response_format JSON enforcement for general chat if needed, 
-            // but here we might want text. 
-            // IMPORTANT: GroqClient above enforces JSON. We need a text version.
-            // We'll modify usage or GroqClient to be flexible.
-
-            // Quick Fix: Inline fetch for non-JSON chat or modify GroqClient.
-            // Let's modify GroqClient logic slightly in-place here or just duplicate simple fetch
-
             const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
                 method: "POST",
                 headers: {
@@ -111,8 +109,13 @@ class QuizEngine {
                     // No response_format for general chat to allow free text
                 })
             });
+
+            if (!response.ok) {
+                const errText = await response.text();
+                throw new Error(`Chat API Error (${response.status}): ${errText}`);
+            }
+
             const data = await response.json();
-            if (!response.ok) throw new Error(JSON.stringify(data));
             return { response: { text: () => data.choices[0].message.content } }; // Mock Gemini interface
         });
     }
@@ -156,6 +159,36 @@ Format:
   ]
 }`;
 
+        return await this._generateAndParse(systemPrompt, userPrompt, topic);
+    }
+
+    async generateQuizFromTopic({ topic, qty = 10, difficulty = 'medium' }) {
+        if (!topic) throw new Error("Topic is required");
+
+        const systemPrompt = `You are a quiz generator. Output strictly JSON.`;
+        const userPrompt = `Instructions:
+Create a quiz about "${topic}".
+Generate exactly ${qty} multiple-choice questions.
+Difficulty: ${difficulty}
+
+Format:
+{
+  "type": "quiz_batch",
+  "topic": "${topic}",
+  "quizzes": [
+    {
+      "question": "Question",
+      "options": ["A", "B", "C", "D"],
+      "correct_index": 0,
+      "answer_explanation": "Explanation"
+    }
+  ]
+}`;
+
+        return await this._generateAndParse(systemPrompt, userPrompt, topic);
+    }
+
+    async _generateAndParse(systemPrompt, userPrompt, topic) {
         let resultText;
         try {
             await this.callWithFallback(async (modelName) => {
@@ -199,10 +232,8 @@ Format:
                 correct_index: cIndex,
                 answer_explanation: (q.explanation || q.answer_explanation || "No explanation provided").trim()
             };
-        }).slice(0, qty);
+        });
     }
-
-    // --- CORE QUIZ LOGIC (Strictly Preserved) ---
 
     async handleVote(vote) {
         try {
