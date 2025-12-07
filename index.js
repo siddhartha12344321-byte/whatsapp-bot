@@ -60,9 +60,17 @@ const userSchema = new mongoose.Schema({
 const User = mongoose.model('User', userSchema);
 
 // --- MEMORY ---
+const chatHistory = new Map();
 const quizSessions = new Map();
 const activePolls = new Map();
 const rateLimit = new Map();
+
+function updateHistory(chatId, role, text) {
+    if (!chatHistory.has(chatId)) chatHistory.set(chatId, []);
+    const history = chatHistory.get(chatId);
+    history.push({ role, parts: [{ text }] });
+    if (history.length > 15) history.shift(); // Keep last 15 turns
+}
 
 function checkRateLimit(chatId) {
     const now = Date.now();
@@ -112,15 +120,36 @@ async function updateUserProfile(userId, name, topic, scoreToAdd = 0) {
     } catch (e) { console.error("DB Error:", e); return { name: name || 'Friend', highScore: 0 }; }
 }
 
+const util = require('util');
+const sleep = util.promisify(setTimeout);
+
+async function callWithRetry(fn, retries = 3) {
+    for (let i = 0; i < retries; i++) {
+        try {
+            return await fn();
+        } catch (e) {
+            if (e.message && e.message.includes("429")) {
+                console.warn(`⚠️ Rate Limit (429). Rotating key & Retrying (${i + 1}/${retries})...`);
+                rotateKey();
+                await sleep(2000 * (i + 1)); // Backoff
+            } else {
+                throw e; // Non-429 error, throw immediately
+            }
+        }
+    }
+    throw new Error("Max retries exceeded for AI Request.");
+}
+
 async function getEmbedding(text) {
     try {
-        const model = genAI.getGenerativeModel({ model: "text-embedding-004" });
-        const result = await model.embedContent(text);
-        return result.embedding.values;
+        return await callWithRetry(async () => {
+            const model = getModel(); // Get fresh model (maybe updated key)
+            const result = await model.embedContent(text);
+            return result.embedding.values;
+        });
     } catch (e) {
-        console.error("Embedding Error:", e);
-        if (e.message.includes("429")) rotateKey();
-        return null;
+        console.error("Embedding Error (Final):", e.message);
+        return null; // Fail gracefully
     }
 }
 
@@ -136,8 +165,10 @@ async function upsertToPinecone(text, id) {
 async function queryPinecone(queryText) {
     try {
         const index = pc.index(indexName);
-        const embedding = await getEmbedding(queryText);
-        const queryResponse = await index.query({ vector: embedding, topK: 3, includeMetadata: true });
+        const vector = await getEmbedding(queryText);
+        if (!vector) return null; // Embedding failed
+
+        const queryResponse = await index.query({ vector: vector, topK: 3, includeMetadata: true });
         if (queryResponse.matches.length > 0) {
             return queryResponse.matches.filter(m => m.score > 0.5).map(m => m.metadata.text).join("\n\n");
         }
