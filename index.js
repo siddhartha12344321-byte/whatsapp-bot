@@ -1194,6 +1194,49 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                 }
                 return;
             }
+            
+            // Priority 2: PDF Learning (save to Pinecone)
+            if (media.mimetype === 'application/pdf' && prompt.toLowerCase().includes("learn")) {
+                await msg.reply("🧠 Processing PDF for learning...");
+                try {
+                    const pdfBuffer = Buffer.from(media.data, 'base64');
+                    const pdfText = await extractPdfText(pdfBuffer);
+                    if (pdfText && pdfText.length > 0) {
+                        // Split large PDFs into chunks for better storage
+                        const chunks = pdfText.match(/.{1,2000}/g) || [pdfText];
+                        for (let i = 0; i < Math.min(chunks.length, 10); i++) {
+                            await upsertToPinecone(chunks[i], `PDF_Learn_${Date.now()}_${i}`);
+                        }
+                        await msg.reply(`✅ PDF content memorized! (${chunks.length} chunks saved)\n\nYou can now ask questions about this PDF content.`);
+                    } else {
+                        await msg.reply("❌ Could not extract text from PDF. Please ensure the PDF contains readable text (not just images).");
+                    }
+                } catch (e) {
+                    console.error("PDF Learning Error:", e);
+                    await msg.reply(`❌ Error processing PDF: ${e.message}`);
+                }
+                return;
+            }
+            
+            // Handle other media types (text files, etc.)
+            if (prompt.toLowerCase().includes("learn")) {
+                await msg.reply("🧠 Memorizing...");
+                try {
+                    let text = "";
+                    if (media.mimetype === 'text/plain') {
+                        text = Buffer.from(media.data, 'base64').toString('utf-8');
+                    }
+                    if (text) {
+                        await upsertToPinecone(text, "UserUpload_" + Date.now());
+                        await msg.reply("✅ Memorized.");
+                    } else {
+                        await msg.reply("❌ Unsupported file type. Please send PDF or text files.");
+                    }
+                } catch (e) {
+                    await msg.reply(`❌ Error: ${e.message}`);
+                }
+                return;
+            }
         }
 
         // Handle manual quiz creation with custom questions
