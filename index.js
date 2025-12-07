@@ -207,9 +207,10 @@ async function loadChatHistory(chatId, limit = 20) {
             .lean();
 
         // Convert to format expected by Gemini
+        // Convert to format expected by Groq (OpenAI Compatible)
         const formattedHistory = history.reverse().map(h => ({
-            role: h.role === 'user' ? 'user' : 'model',
-            parts: [{ text: h.text }]
+            role: h.role === 'user' ? 'user' : 'assistant', // Groq uses 'assistant'
+            content: h.text
         }));
 
         // Update in-memory cache
