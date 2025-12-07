@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quiz Admin Panel</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, sans-serif; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); min-height: 100vh; color: #fff; }
+        .header { text-align: center; padding: 20px; background: rgba(0,0,0,0.3); }
+        .header h1 { font-size: 2rem; color: #00ff88; }
+        .creators-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; padding: 20px; max-width: 1200px; margin: 0 auto; }
+        .creator-card { background: rgba(255,255,255,0.1); border-radius: 15px; padding: 20px; text-align: center; cursor: pointer; transition: all 0.3s; border: 2px solid transparent; }
+        .creator-card:hover { transform: translateY(-5px); border-color: #00ff88; background: rgba(255,255,255,0.15); }
+        .creator-card h2 { color: #00ff88; margin-bottom: 10px; font-size: 1.5rem; }
+        .creator-card p { color: #aaa; font-size: 0.9rem; }
+        .creator-card .quiz-count { background: #00ff88; color: #000; padding: 5px 15px; border-radius: 20px; display: inline-block; margin-top: 10px; font-weight: bold; }
+        .btn { background: linear-gradient(90deg, #00ff88, #00cc6a); color: #000; border: none; padding: 15px 30px; border-radius: 25px; font-size: 1rem; cursor: pointer; font-weight: bold; transition: all 0.3s; margin-top: 15px; }
+        .btn:hover { transform: scale(1.05); box-shadow: 0 5px 20px rgba(0,255,136,0.4); }
+        @media (max-width: 768px) { .creators-grid { grid-template-columns: 1fr; } }
+        
+        /* Modal/Panel Styles */
+        .panel { display: none; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .panel.active { display: block; }
+        .section { background: rgba(255,255,255,0.1); border-radius: 15px; padding: 20px; margin-bottom: 20px; }
+        .section h2 { color: #00ff88; margin-bottom: 15px; border-bottom: 1px solid #00ff88; padding-bottom: 10px; }
+        input, select, textarea { width: 100%; padding: 12px; margin: 8px 0; border: none; border-radius: 8px; background: rgba(255,255,255,0.1); color: #fff; font-size: 1rem; }
+        input::placeholder, textarea::placeholder { color: #888; }
+        .btn-secondary { background: rgba(255,255,255,0.2); color: #fff; }
+        .btn-danger { background: linear-gradient(90deg, #ff4444, #cc3333); color: #fff; }
+        .question-item { background: rgba(0,0,0,0.2); padding: 15px; border-radius: 10px; margin: 10px 0; }
+        .question-item h4 { color: #00ff88; margin-bottom: 10px; }
+        .options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 10px 0; }
+        .quiz-list { max-height: 400px; overflow-y: auto; }
+        .quiz-card { background: rgba(0,0,0,0.3); padding: 15px; border-radius: 10px; margin: 10px 0; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
+        .quiz-card h4 { color: #fff; flex: 1; }
+        .status { padding: 3px 10px; border-radius: 15px; font-size: 0.8rem; }
+        .status.draft { background: #666; }
+        .status.scheduled { background: #ff9900; color: #000; }
+        .status.active { background: #00ff88; color: #000; }
+        .back-btn { color: #00ff88; text-decoration: none; font-size: 1.2rem; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <!-- Main Selection Page -->
+    <div id="mainPage" class="panel active">
+        <div class="header">
+            <h1>📚 Quiz Admin Panel</h1>
+            <p>Select your name to create and manage quizzes</p>
+        </div>
+        <div class="creators-grid">
+            <div class="creator-card" onclick="openCreatorPanel('SIDDHARTHA')">
+                <h2>👤 SIDDHARTHA</h2>
+                <p>Create and manage your quizzes</p>
+                <span class="quiz-count" id="count-SIDDHARTHA">0 quizzes</span>
+            </div>
+            <div class="creator-card" onclick="openCreatorPanel('SAURABH')">
+                <h2>👤 SAURABH</h2>
+                <p>Create and manage your quizzes</p>
+                <span class="quiz-count" id="count-SAURABH">0 quizzes</span>
+            </div>
+            <div class="creator-card" onclick="openCreatorPanel('VIKAS')">
+                <h2>👤 VIKAS</h2>
+                <p>Create and manage your quizzes</p>
+                <span class="quiz-count" id="count-VIKAS">0 quizzes</span>
+            </div>
+            <div class="creator-card" onclick="openCreatorPanel('GAURAV')">
+                <h2>👤 GAURAV</h2>
+                <p>Create and manage your quizzes</p>
+                <span class="quiz-count" id="count-GAURAV">0 quizzes</span>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Creator Panel (shown when a creator is selected) -->
+    <div id="creatorPanel" class="panel">
+        <div class="header" style="display: flex; justify-content: space-between; align-items: center;">
+            <span class="back-btn" onclick="goBack()">← Back</span>
+            <h1 id="creatorTitle">👤 Creator's Quiz Panel</h1>
+            <span></span>
+        </div>
+        
+        <!-- Create New Quiz Section -->
+        <div class="section">
+            <h2>📝 Create New Quiz</h2>
+            <input type="text" id="quizTitle" placeholder="Quiz Title (e.g., Geography Chapter 5)">
+            <select id="targetGroup">
+                <option value="">Select WhatsApp Group</option>
+            </select>
+            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                <div>
+                    <label style="font-size: 0.9rem;">Seconds per question:</label>
+                    <input type="number" id="timer" value="30" min="10" max="300" style="width: 100px;">
+                </div>
+                <div style="flex: 1;">
+                    <label style="font-size: 0.9rem;">Schedule (optional):</label>
+                    <input type="datetime-local" id="scheduledTime">
+                </div>
+            </div>
+            
+            <h3 style="margin-top: 20px; color: #00ff88;">Questions</h3>
+            <div id="questionsContainer"></div>
+            <button class="btn btn-secondary" onclick="addQuestion()">+ Add Question</button>
+            <div style="margin-top: 20px; display: flex; gap: 10px; flex-wrap: wrap;">
+                <button class="btn" onclick="saveQuiz('draft')">💾 Save Draft</button>
+                <button class="btn" onclick="saveQuiz('scheduled')">⏰ Schedule Quiz</button>
+                <button class="btn" onclick="deployNow()">🚀 Deploy Now</button>
+            </div>
+        </div>
+        
+        <!-- My Quizzes Section -->
+        <div class="section">
+            <h2>📚 My Quizzes</h2>
+            <div class="quiz-list" id="quizList">Loading...</div>
+        </div>
+    </div>
+    
+    <script>
+        let currentCreator = '';
+        let questionCount = 0;
+        
+        // Load quiz counts on page load
+        fetch('/api/quiz/counts')
+            .then(r => r.json())
+            .then(data => {
+                ['SIDDHARTHA', 'SAURABH', 'VIKAS', 'GAURAV'].forEach(name => {
+                    const el = document.getElementById('count-' + name);
+                    if (el) el.textContent = (data[name] || 0) + ' quizzes';
+                });
+            })
+            .catch(() => console.log('Could not load quiz counts'));
+        
+        function openCreatorPanel(name) {
+            currentCreator = name;
+            document.getElementById('mainPage').classList.remove('active');
+            document.getElementById('creatorPanel').classList.add('active');
+            document.getElementById('creatorTitle').textContent = '👤 ' + name + "'s Quiz Panel";
+            loadGroups();
+            loadQuizzes();
+            if (questionCount === 0) addQuestion();
+        }
+        
+        function goBack() {
+            document.getElementById('creatorPanel').classList.remove('active');
+            document.getElementById('mainPage').classList.add('active');
+            // Reload counts
+            fetch('/api/quiz/counts')
+                .then(r => r.json())
+                .then(data => {
+                    ['SIDDHARTHA', 'SAURABH', 'VIKAS', 'GAURAV'].forEach(name => {
+                        const el = document.getElementById('count-' + name);
+                        if (el) el.textContent = (data[name] || 0) + ' quizzes';
+                    });
+                });
+        }
+        
+        function loadGroups() {
+            fetch('/api/groups')
+                .then(r => r.json())
+                .then(groups => {
+                    const select = document.getElementById('targetGroup');
+                    select.innerHTML = '<option value="">Select WhatsApp Group</option>';
+                    groups.forEach(g => {
+                        const opt = document.createElement('option');
+                        opt.value = g.id;
+                        opt.textContent = g.name;
+                        select.appendChild(opt);
+                    });
+                })
+                .catch(() => console.log('Could not load groups'));
+        }
+        
+        function loadQuizzes() {
+            fetch('/api/quiz/list?creator=' + currentCreator)
+                .then(r => r.json())
+                .then(quizzes => {
+                    const container = document.getElementById('quizList');
+                    if (quizzes.length === 0) {
+                        container.innerHTML = '<p style="color:#888;">No quizzes yet. Create your first one!</p>';
+                        return;
+                    }
+                    container.innerHTML = quizzes.map(q => {
+                        let actions = '<button class="btn btn-danger" style="padding:5px 10px;" onclick="deleteQuiz(\'' + q._id + '\')">🗑️</button>';
+                        if (q.status === 'draft') {
+                            actions += '<button class="btn" style="padding:5px 10px;margin-left:5px;" onclick="deployQuiz(\'' + q._id + '\')">🚀</button>';
+                        }
+                        return '<div class="quiz-card"><div><h4>' + q.title + '</h4><small>' + q.questions.length + ' questions</small></div><div><span class="status ' + q.status + '">' + q.status.toUpperCase() + '</span> ' + actions + '</div></div>';
+                    }).join('');
+                })
+                .catch(() => {
+                    document.getElementById('quizList').innerHTML = '<p style="color:#f66;">Error loading quizzes</p>';
+                });
+        }
+        
+        function addQuestion() {
+            questionCount++;
+            const container = document.getElementById('questionsContainer');
+            const div = document.createElement('div');
+            div.className = 'question-item';
+            div.id = 'q' + questionCount;
+            div.innerHTML = 
+                '<h4>Question ' + questionCount + ' <span onclick="removeQuestion(' + questionCount + ')" style="color:#f44;cursor:pointer;float:right;">✕</span></h4>' +
+                '<textarea placeholder="Enter question text" id="qtext' + questionCount + '" rows="2"></textarea>' +
+                '<div class="options">' +
+                '<input type="text" placeholder="Option A" id="opt' + questionCount + 'a">' +
+                '<input type="text" placeholder="Option B" id="opt' + questionCount + 'b">' +
+                '<input type="text" placeholder="Option C" id="opt' + questionCount + 'c">' +
+                '<input type="text" placeholder="Option D" id="opt' + questionCount + 'd">' +
+                '</div>' +
+                '<select id="correct' + questionCount + '">' +
+                '<option value="0">Correct: A</option><option value="1">Correct: B</option>' +
+                '<option value="2">Correct: C</option><option value="3">Correct: D</option>' +
+                '</select>' +
+                '<textarea placeholder="Explanation (shown after quiz)" id="exp' + questionCount + '" rows="2"></textarea>';
+            container.appendChild(div);
+        }
+        
+        function removeQuestion(id) {
+            const el = document.getElementById('q' + id);
+            if (el) el.remove();
+        }
+        
+        function collectQuestions() {
+            const questions = [];
+            document.querySelectorAll('.question-item').forEach(el => {
+                const num = el.id.replace('q', '');
+                const q = document.getElementById('qtext' + num);
+                if (!q || !q.value) return;
+                questions.push({
+                    question: q.value,
+                    options: [
+                        document.getElementById('opt' + num + 'a')?.value || 'Option A',
+                        document.getElementById('opt' + num + 'b')?.value || 'Option B',
+                        document.getElementById('opt' + num + 'c')?.value || 'Option C',
+                        document.getElementById('opt' + num + 'd')?.value || 'Option D'
+                    ],
+                    correctIndex: parseInt(document.getElementById('correct' + num)?.value || 0),
+                    explanation: document.getElementById('exp' + num)?.value || ''
+                });
+            });
+            return questions;
+        }
+        
+        function saveQuiz(status) {
+            const title = document.getElementById('quizTitle').value;
+            if (!title) return alert('Please enter a quiz title');
+            const questions = collectQuestions();
+            if (questions.length === 0) return alert('Please add at least one question');
+            
+            const data = {
+                title: title,
+                creator: currentCreator,
+                questions: questions,
+                status: status,
+                targetGroup: document.getElementById('targetGroup').value,
+                timer: parseInt(document.getElementById('timer').value) || 30,
+                scheduledTime: document.getElementById('scheduledTime').value || null
+            };
+            
+            fetch('/api/quiz/create', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            })
+            .then(r => r.json())
+            .then(result => {
+                if (result.success) {
+                    alert('Quiz saved successfully!');
+                    document.getElementById('quizTitle').value = '';
+                    document.getElementById('questionsContainer').innerHTML = '';
+                    questionCount = 0;
+                    addQuestion();
+                    loadQuizzes();
+                } else {
+                    alert('Error: ' + (result.error || 'Unknown error'));
+                }
+            })
+            .catch(e => alert('Error saving quiz: ' + e.message));
+        }
+        
+        function deployNow() {
+            const group = document.getElementById('targetGroup').value;
+            if (!group) return alert('Please select a WhatsApp group');
+            saveQuiz('active');
+        }
+        
+        function deleteQuiz(id) {
+            if (!confirm('Delete this quiz?')) return;
+            fetch('/api/quiz/delete/' + id, { method: 'DELETE' })
+                .then(r => r.json())
+                .then(() => loadQuizzes())
+                .catch(e => alert('Error deleting: ' + e.message));
+        }
+        
+        function deployQuiz(id) {
+            if (!confirm('Deploy this quiz to WhatsApp now?')) return;
+            fetch('/api/quiz/deploy/' + id, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            })
+            .then(r => r.json())
+            .then(result => {
+                if (result.success) {
+                    alert('Quiz deployed to WhatsApp!');
+                    loadQuizzes();
+                } else {
+                    alert('Error: ' + (result.error || 'Could not deploy'));
+                }
+            })
+            .catch(e => alert('Deployment failed: ' + e.message));
+        }
+    </script>
+</body>
+</html>

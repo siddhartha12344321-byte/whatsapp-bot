@@ -478,7 +478,194 @@ app.get('/qr', async (req, res) => {
         res.send(`<div style="display:flex;flex-direction:column;justify-content:center;align-items:center;"><h1>Scan QR</h1><img src="${url}" style="border:5px solid #000; width:300px;"></div>`);
     } catch { res.send('Error generating QR.'); }
 });
-app.listen(port, () => console.log(`Server running on port ${port}`));
+
+// ============================================
+// 📚 WEB QUIZ ADMIN PANEL - /quizsection
+// ============================================
+
+// MongoDB Schema for Web-Created Quizzes
+const webQuizSchema = new mongoose.Schema({
+    title: { type: String, required: true },
+    creator: { type: String, required: true, enum: ['SIDDHARTHA', 'SAURABH', 'VIKAS', 'GAURAV'] },
+    questions: [{
+        question: String,
+        options: [String],
+        correctIndex: Number,
+        explanation: String
+    }],
+    targetGroup: String,
+    timer: { type: Number, default: 30 },
+    scheduledTime: Date,
+    status: { type: String, default: 'draft', enum: ['draft', 'scheduled', 'active', 'completed'] },
+    createdAt: { type: Date, default: Date.now }
+});
+const WebQuiz = mongoose.model('WebQuiz', webQuizSchema);
+
+// Store scheduled quiz jobs
+const scheduledJobs = new Map();
+
+// Middleware to parse JSON and serve static files
+app.use(express.json());
+app.use('/public', express.static('public'));
+
+// Serve quiz section HTML
+app.get('/quizsection', (req, res) => {
+    res.sendFile(__dirname + '/public/quizsection.html');
+});
+
+// API: Get quiz counts per creator
+app.get('/api/quiz/counts', async (req, res) => {
+    try {
+        const counts = {};
+        for (const creator of ['SIDDHARTHA', 'SAURABH', 'VIKAS', 'GAURAV']) {
+            counts[creator] = await WebQuiz.countDocuments({ creator });
+        }
+        res.json(counts);
+    } catch (e) {
+        res.json({ error: e.message });
+    }
+});
+
+// API: List quizzes for a creator
+app.get('/api/quiz/list', async (req, res) => {
+    try {
+        const creator = req.query.creator ? req.query.creator.toUpperCase() : null;
+        const query = creator ? { creator } : {};
+        const quizzes = await WebQuiz.find(query).sort({ createdAt: -1 }).limit(50);
+        res.json(quizzes);
+    } catch (e) {
+        res.json([]);
+    }
+});
+
+// API: Create a new quiz
+app.post('/api/quiz/create', async (req, res) => {
+    try {
+        const { title, creator, questions, targetGroup, timer, scheduledTime, status } = req.body;
+        const quiz = new WebQuiz({
+            title,
+            creator: creator ? creator.toUpperCase() : 'SIDDHARTHA',
+            questions,
+            targetGroup,
+            timer: timer || 30,
+            scheduledTime: scheduledTime ? new Date(scheduledTime) : null,
+            status: status || 'draft'
+        });
+        await quiz.save();
+
+        // If scheduled, set up the job
+        if (status === 'scheduled' && scheduledTime && targetGroup) {
+            const scheduleDate = new Date(scheduledTime);
+            if (scheduleDate > new Date()) {
+                const timeoutMs = scheduleDate.getTime() - Date.now();
+                const jobId = setTimeout(async () => {
+                    await deployQuizToGroup(quiz._id, targetGroup);
+                    scheduledJobs.delete(quiz._id.toString());
+                }, timeoutMs);
+                scheduledJobs.set(quiz._id.toString(), jobId);
+                console.log("⏰ Quiz scheduled for " + scheduleDate.toISOString());
+            }
+        }
+
+        // If active, deploy immediately
+        if (status === 'active' && targetGroup) {
+            deployQuizToGroup(quiz._id, targetGroup);
+        }
+
+        res.json({ success: true, quizId: quiz._id });
+    } catch (e) {
+        console.error('Quiz create error:', e);
+        res.json({ success: false, error: e.message });
+    }
+});
+
+// API: Delete a quiz
+app.delete('/api/quiz/delete/:id', async (req, res) => {
+    try {
+        await WebQuiz.findByIdAndDelete(req.params.id);
+        // Cancel scheduled job if exists
+        if (scheduledJobs.has(req.params.id)) {
+            clearTimeout(scheduledJobs.get(req.params.id));
+            scheduledJobs.delete(req.params.id);
+        }
+        res.json({ success: true });
+    } catch (e) {
+        res.json({ success: false, error: e.message });
+    }
+});
+
+// API: Deploy a quiz to WhatsApp
+app.post('/api/quiz/deploy/:id', async (req, res) => {
+    try {
+        const quiz = await WebQuiz.findById(req.params.id);
+        if (!quiz) return res.json({ success: false, error: 'Quiz not found' });
+
+        const groupId = req.body.groupId || quiz.targetGroup;
+        if (!groupId) return res.json({ success: false, error: 'No target group specified' });
+
+        await deployQuizToGroup(quiz._id, groupId);
+        res.json({ success: true });
+    } catch (e) {
+        res.json({ success: false, error: e.message });
+    }
+});
+
+// API: Get list of WhatsApp groups
+app.get('/api/groups', async (req, res) => {
+    try {
+        if (!client || !client.info) {
+            return res.json([{ id: 'not_connected', name: 'WhatsApp not connected' }]);
+        }
+        const chats = await client.getChats();
+        const groups = chats.filter(c => c.isGroup).map(g => ({
+            id: g.id._serialized,
+            name: g.name
+        }));
+        res.json(groups);
+    } catch (e) {
+        res.json([]);
+    }
+});
+
+// Helper: Deploy quiz to a WhatsApp group
+async function deployQuizToGroup(quizId, groupId) {
+    try {
+        const quiz = await WebQuiz.findById(quizId);
+        if (!quiz || !client) return;
+
+        // Convert web quiz format to QuizEngine format
+        const questions = quiz.questions.map((q, i) => ({
+            question: q.question,
+            options: q.options,
+            correct: q.correctIndex,
+            explanation: q.explanation
+        }));
+
+        // Get the chat
+        const chat = await client.getChatById(groupId);
+        if (!chat) {
+            console.error('Group not found:', groupId);
+            return;
+        }
+
+        // Update quiz status
+        quiz.status = 'active';
+        await quiz.save();
+
+        // Send intro message
+        const introMsg = "📚 *Quiz Starting!*\n\n📝 *" + quiz.title + "*\n👤 Created by: *" + quiz.creator + "*\n❓ Questions: " + questions.length + "\n⏱️ Time per question: " + quiz.timer + "s\n\n🎯 Get ready!";
+        await chat.sendMessage(introMsg);
+
+        // Start the quiz using QuizEngine
+        quizEngine.startQuiz(chat, groupId, questions, quiz.title, quiz.timer);
+
+        console.log("🚀 Quiz '" + quiz.title + "' deployed to " + groupId);
+    } catch (e) {
+        console.error('Deploy error:', e);
+    }
+}
+
+app.listen(port, () => console.log("Server running on port " + port));
 
 // --- HELPER FUNCTIONS ---
 async function updateUserProfile(userId, name, topic, scoreToAdd = 0) {
