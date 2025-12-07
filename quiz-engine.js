@@ -3,6 +3,12 @@ const pdfParse = require('pdf-parse');
 const util = require('util');
 const sleep = util.promisify(setTimeout);
 
+// Enhanced Logging for quiz-engine
+const getTimestamp = () => new Date().toISOString().split('T')[1].split('.')[0];
+const log = (msg) => console.log(`[${getTimestamp()}] [QuizEngine] ${msg}`);
+const error = (msg) => console.error(`[${getTimestamp()}] [QuizEngine] ${msg}`);
+const warn = (msg) => console.warn(`[${getTimestamp()}] [QuizEngine] ${msg}`);
+
 // --- GROQ CLIENT IMPLEMENTATION (Fetch Base) ---
 // We use fetch directly to avoid npm dependency issues
 class GroqClient {
@@ -46,6 +52,9 @@ class GroqClient {
 
 class QuizEngine {
     constructor(apiKey) {
+        if (!apiKey) {
+            warn("Groq API Key not provided - Quiz features may not work!");
+        }
         this.apiKey = apiKey;
         this.groq = new GroqClient(this.apiKey);
 
@@ -61,6 +70,7 @@ class QuizEngine {
             "llama-3.1-8b-instant",
             "gemma2-9b-it"
         ];
+        log(`Initialized with ${this.MODELS.length} available models`);
     }
 
     async callWithFallback(fnGenerator) {

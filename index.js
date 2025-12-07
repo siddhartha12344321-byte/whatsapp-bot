@@ -1,3 +1,19 @@
+// Enhanced Logging Setup
+const originalLog = console.log;
+const originalError = console.error;
+const originalWarn = console.warn;
+
+const getTimestamp = () => new Date().toISOString().split('T')[1].split('.')[0];
+console.log = function(...args) {
+    originalLog(`[${getTimestamp()}]`, ...args);
+};
+console.error = function(...args) {
+    originalError(`[${getTimestamp()}]`, ...args);
+};
+console.warn = function(...args) {
+    originalWarn(`[${getTimestamp()}]`, ...args);
+};
+
 const { Client, LocalAuth, RemoteAuth, Poll, MessageMedia } = require('whatsapp-web.js');
 const { MongoStore } = require('wwebjs-mongo');
 const qrcode = require('qrcode-terminal');
@@ -19,15 +35,32 @@ const indexName = 'whatsapp-bot';
 // --- CONFIGURATION ---
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb+srv://amurag12344321_db_user:78mbO8WPw69AeTpt@siddharthawhatsappbot.wfbdgjf.mongodb.net/?appName=SiddharthaWhatsappBot";
 const PINECONE_API_KEY = process.env.PINECONE_API_KEY || 'pcsk_4YGs7G_FB4bw1RbEejhHeiwEeL8wrU2vS1vQfFS2TcdhxJjsrehCHMyeFtHw4cHJkWPZvc';
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+
+// Validate API Keys on startup
+console.log("🔑 Checking required API keys...");
+if (!GROQ_API_KEY) {
+    console.warn("⚠️ GROQ_API_KEY not set in environment - some features may not work");
+}
+if (!PINECONE_API_KEY) {
+    console.warn("⚠️ PINECONE_API_KEY not set in environment - some features may not work");
+}
 
 // --- CONNECTIONS ---
 // 1. MongoDB (Initialized in startClient)
 
 // 2. Pinecone
-const pc = new Pinecone({ apiKey: PINECONE_API_KEY });
+let pc = null;
+try {
+    pc = new Pinecone({ apiKey: PINECONE_API_KEY });
+    console.log("✅ Pinecone client initialized");
+} catch (err) {
+    console.error("⚠️ Pinecone initialization failed:", err.message);
+}
 
 // 3. Groq (Replaces Gemini)
-const quizEngine = new QuizEngine(process.env.GROQ_API_KEY);
+const quizEngine = new QuizEngine(GROQ_API_KEY);
+console.log("✅ Quiz engine initialized");
 
 // Legacy Gemini Keys (Restored for safety of legacy functions)
 const rawKeys = [
@@ -1054,7 +1087,80 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
         if (prompt.toLowerCase().startsWith("search ")) return await handleWebSearch(msg, prompt.replace("search ", ""));
 
         // Priority 1: Topic Quiz Generation (Text-based)
-        /* TEMPORARILY REMOVED TO FIX CRASH */
+        if (prompt.match(/\b(create|generate|make|start)\s+(?:a\s+)?(?:mock\s+)?(?:test|quiz|poll)/i) && !msg.hasMedia) {
+            await msg.reply("🧠 Analyzing request and generating quiz...");
+
+            // 1. Parse Timer
+            let timer = 30; // default 30 seconds
+            const timePatterns = [
+                /every\s+(\d+)\s*(second|sec|s|minute|min|m)/i,
+                /timer\s*[:=]\s*(\d+)\s*(second|sec|s|minute|min|m)/i,
+                /(\d+)\s*(second|sec|s|minute|min|m)\s*(?:timer|interval|per\s+question)/i,
+                /(\d+)\s*(?:s|sec|second|seconds)/i,
+                /(\d+)\s*(?:m|min|minute|minutes)/i
+            ];
+            for (const pattern of timePatterns) {
+                const match = prompt.match(pattern);
+                if (match) {
+                    const value = parseInt(match[1]);
+                    const unit = (match[2] || match[0]).toLowerCase();
+                    if (unit.includes('m') || unit.includes('min')) timer = value * 60;
+                    else timer = value;
+                    timer = Math.max(5, Math.min(300, timer));
+                    break;
+                }
+            }
+
+            // 2. Parse Quantity
+            let qty = 10; // default
+            const qtyMatch = prompt.match(/(\d+)\s*(?:questions?|q|qty|quantity)/i);
+            if (qtyMatch) qty = Math.max(1, Math.min(50, parseInt(qtyMatch[1])));
+
+            // 3. Parse Difficulty
+            let difficulty = 'medium';
+            if (prompt.match(/\b(easy|simple|beginner)\b/i)) difficulty = 'easy';
+            else if (prompt.match(/\b(hard|difficult|advanced|expert)\b/i)) difficulty = 'hard';
+
+            // 4. Extract Topic
+            let topic = "General Knowledge";
+            const topicPatterns = [
+                /topic\s+["']?([^"'\n]+)["']?/i,
+                /on\s+["']?([^"'\n]+)["']?/i,
+                /about\s+["']?([^"'\n]+)["']?/i,
+                /quiz\s+(?:on|about|for)\s+["']?([^"'\n]+)["']?/i
+            ];
+            for (const pattern of topicPatterns) {
+                const match = prompt.match(pattern);
+                if (match && match[1]) {
+                    topic = match[1].trim();
+                    // Clean up the extracted topic if it accidentally grabbed the "with 3 questions" part
+                    topic = topic.split(/\s+with\s+|\s+ensure\s+|\s+every\s+/i)[0].trim();
+                    break;
+                }
+            }
+
+            console.log(`🧠 Generating Topic Quiz: Topic="${topic}", Qty=${qty}, Timer=${timer}s`);
+
+            try {
+                const questions = await quizEngine.generateQuizFromTopic({
+                    topic,
+                    qty,
+                    difficulty
+                });
+
+                if (questions.length === 0) {
+                    await msg.reply(`❌ Could not generate questions for "${topic}". Please try a simpler topic.`);
+                    return;
+                }
+
+                await msg.reply(`✅ Generated ${questions.length} questions on "${topic}"\n⏱️ Timer: ${timer}s per question\n\n🎯 Starting quiz now!`);
+                quizEngine.startQuiz(chat, chat.id._serialized, questions, topic, timer);
+            } catch (e) {
+                console.error("Topic Quiz Error:", e);
+                await msg.reply(`❌ Quiz Generation Error: ${e.message}`);
+            }
+            return;
+        }
 
         // Handle media files (PDF, images, etc.)
         if (msg.hasMedia) {
@@ -1285,17 +1391,29 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
 
         console.log("🔍 Starting memory retrieval...");
 
-        // Get multiple types of context
-        const [ragContext, relevantMemories, userMemories] = await Promise.all([
-            queryPinecone(prompt), // Document/PDF context
-            getRelevantMemories(prompt, chat.id._serialized), // Past conversations
-            getUserMemories(chat.id._serialized, user.userId || chat.id._serialized.split('@')[0]) // User facts
-        ]);
+        // Get multiple types of context with timeout (1s max)
+        let ragContext = null, userMemories = null;
+        try {
+            const contextPromise = (async () => {
+                const [pineconeCtx, userMem] = await Promise.all([
+                    queryPinecone(prompt).catch(() => null),
+                    getUserMemories(chat.id._serialized, user.userId || chat.id._serialized.split('@')[0]).catch(() => null)
+                ]);
+                return { pineconeCtx, userMem };
+            })();
+
+            const timeoutPromise = new Promise(resolve => setTimeout(() => resolve({ pineconeCtx: null, userMem: null }), 1000));
+
+            const result = await Promise.race([contextPromise, timeoutPromise]);
+            ragContext = result.pineconeCtx;
+            userMemories = result.userMem;
+        } catch (err) {
+            console.warn("⚠️ Memory retrieval timeout/error, continuing without context:", err.message);
+        }
 
         // Combine all context
         let contextParts = [];
         if (ragContext) contextParts.push(`📚 Study Materials:\n${ragContext}`);
-        if (relevantMemories.length > 0) contextParts.push(`💭 Relevant Past Conversations:\n${relevantMemories.join('\n\n')}`);
         if (userMemories) contextParts.push(`👤 User Information:\n${userMemories}`);
 
         const context = contextParts.length > 0 ? contextParts.join('\n\n') : null;
@@ -1312,35 +1430,15 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
         );
 
         try {
-            console.log(`🤖 Hydra Trying: Groq (Llama 3)`);
-
-            // SPEED OPTIMIZATION: Race context retrieval against 1s timeout
-            // If memory takes too long, we skip it to reply fast.
-            const contextPromise = (async () => {
-                const [pineconeCtx, userMem] = await Promise.all([
-                    queryPinecone(prompt).catch(() => null),
-                    getUserMemories(chat.id._serialized, user.userId || chat.id._serialized.split('@')[0]).catch(() => null)
-                ]);
-                return { pineconeCtx, userMem };
-            })();
-
-            const timeoutPromise = new Promise(resolve => setTimeout(() => resolve({ pineconeCtx: null, userMem: null }), 1000));
-
-            const { pineconeCtx: ragContext, userMem: userMemories } = await Promise.race([contextPromise, timeoutPromise]);
-
-            // Combine all context
-            let contextParts = [];
-            if (ragContext) contextParts.push(`📚 Study Materials:\n${ragContext}`);
-            if (userMemories) contextParts.push(`👤 User Information:\n${userMemories}`);
-
-            const context = contextParts.length > 0 ? contextParts.join('\n\n') : null;
-            const memoryContext = userMemories ? `\n\nRemember about this user: ${userMemories}` : '';
+            console.log(`🤖 Using Groq (Llama 3) for response...`);
 
             // Enhance prompt based on question type
             let enhancedPrompt = prompt;
             if (isMCQ) {
                 enhancedPrompt = `As an exam tutor, explain this MCQ/poll in MAX 100 words:\n${prompt}`;
             }
+
+            const memoryContext = userMemories ? `\n\nRemember about this user: ${userMemories}` : '';
 
             const systemPrompt = isMCQ
                 ? `You are an exam tutor for UPSC/SSC/government exams. For MCQs/polls, provide structured explanation in MAX 100 words:
@@ -1370,7 +1468,7 @@ Don't force a rigid format - adapt to the question type naturally.`;
             ]);
 
             responseText = chatSession.response.text();
-            console.log(`✅ Hydra Success with: Groq`);
+            console.log(`✅ Groq response generated successfully`);
         } catch (err) {
             console.error("🔥 All Models Failed:", err);
             const errorMsg = err.message || '';
@@ -1513,4 +1611,19 @@ async function startClient() {
     }
 }
 
-startClient();
+// Global error handlers
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('❌ Uncaught Exception:', error);
+    process.exit(1);
+});
+
+console.log("🚀 WhatsApp Bot Starting...");
+startClient().catch(err => {
+    console.error("🚀 Failed to start bot:", err);
+    process.exit(1);
+});
+
