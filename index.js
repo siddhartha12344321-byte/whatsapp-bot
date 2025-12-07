@@ -12,6 +12,7 @@ const pdfParse = require('pdf-parse');
 const mongoose = require('mongoose');
 const { Pinecone } = require('@pinecone-database/pinecone');
 const googleTTS = require('google-tts-api');
+const QuizEngine = require('./quiz-engine');
 
 // --- CONFIGURATION ---
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb+srv://amurag12344321_db_user:78mbO8WPw69AeTpt@siddharthawhatsappbot.wfbdgjf.mongodb.net/?appName=SiddharthaWhatsappBot";
@@ -27,6 +28,8 @@ const pc = new Pinecone({ apiKey: PINECONE_API_KEY });
 
 // 3. Gemini
 const rawKeys = [process.env.GEMINI_API_KEY_2, process.env.GEMINI_API_KEY].filter(k => k);
+const quizEngine = new QuizEngine(rawKeys);
+
 let currentKeyIndex = 0;
 let genAI = rawKeys.length ? new GoogleGenerativeAI(rawKeys[currentKeyIndex]) : null;
 
@@ -74,11 +77,11 @@ function isQuotaError(error) {
     if (!error) return false;
     const message = error.message || '';
     const status = error.status || '';
-    return status === 429 || 
-           message.includes('429') || 
-           message.includes('quota') || 
-           message.includes('Quota exceeded') ||
-           message.includes('rate limit');
+    return status === 429 ||
+        message.includes('429') ||
+        message.includes('quota') ||
+        message.includes('Quota exceeded') ||
+        message.includes('rate limit');
 }
 
 // Check if error is a 404 (model not found)
@@ -137,8 +140,6 @@ const Memory = mongoose.model('Memory', memorySchema);
 
 // --- MEMORY ---
 const chatHistory = new Map(); // In-memory cache for current session
-const quizSessions = new Map();
-const activePolls = new Map();
 const rateLimit = new Map();
 
 // Enhanced memory function - saves to MongoDB AND Pinecone
@@ -148,25 +149,25 @@ async function updateHistory(chatId, role, text, userId = null) {
         console.warn("⚠️ Invalid updateHistory call:", { chatId, role, text: typeof text, textLength: text?.length });
         return; // Skip if invalid
     }
-    
+
     // Clean and validate text
     const cleanText = String(text).trim();
     if (cleanText.length === 0) {
         console.warn("⚠️ Empty text in updateHistory, skipping save");
         return; // Don't save empty messages
     }
-    
+
     // Update in-memory cache (for immediate use)
     if (!chatHistory.has(chatId)) chatHistory.set(chatId, []);
     const history = chatHistory.get(chatId);
     history.push({ role, parts: [{ text: cleanText }] });
     if (history.length > 20) history.shift(); // Keep last 20 turns in memory
-    
+
     // Save to MongoDB for persistence (async, don't wait)
     if ((userId || chatId) && cleanText.length > 0) {
         const userIdValue = userId || chatId.split('@')[0] || 'unknown';
         const textToSave = cleanText.substring(0, 5000); // Limit text length
-        
+
         ChatHistory.create({
             chatId: String(chatId),
             userId: String(userIdValue),
@@ -177,17 +178,17 @@ async function updateHistory(chatId, role, text, userId = null) {
             console.error("Error saving chat history:", err.message || err);
         });
     }
-    
+
     // Save important conversations to Pinecone for semantic search
     // Only save user messages and important model responses
     if (cleanText.length > 0 && (role === 'user' || (role === 'model' && cleanText.length > 100))) {
         const memoryId = `chat_${chatId}_${Date.now()}`;
-        const memoryText = role === 'user' 
+        const memoryText = role === 'user'
             ? `User said: ${cleanText}`
             : `Bot responded: ${cleanText}`;
-        
+
         // Save to Pinecone asynchronously (don't block)
-        upsertToPinecone(memoryText, memoryId).catch(err => 
+        upsertToPinecone(memoryText, memoryId).catch(err =>
             console.error("Error saving to Pinecone:", err.message || err)
         );
     }
@@ -200,18 +201,18 @@ async function loadChatHistory(chatId, limit = 20) {
             .sort({ timestamp: -1 })
             .limit(limit)
             .lean();
-        
+
         // Convert to format expected by Gemini
         const formattedHistory = history.reverse().map(h => ({
             role: h.role === 'user' ? 'user' : 'model',
             parts: [{ text: h.text }]
         }));
-        
+
         // Update in-memory cache
         if (formattedHistory.length > 0) {
             chatHistory.set(chatId, formattedHistory);
         }
-        
+
         return formattedHistory;
     } catch (err) {
         console.error("Error loading chat history:", err);
@@ -225,17 +226,17 @@ async function getRelevantMemories(query, chatId = null, limit = 5) {
         const index = pc.index(indexName);
         const vector = await getEmbedding(query);
         if (!vector) return [];
-        
+
         // Build filter for this chat if provided
         const filter = chatId ? { chatId: { $eq: chatId } } : {};
-        
-        const queryResponse = await index.query({ 
-            vector: vector, 
-            topK: limit, 
+
+        const queryResponse = await index.query({
+            vector: vector,
+            topK: limit,
             includeMetadata: true,
             filter: Object.keys(filter).length > 0 ? filter : undefined
         });
-        
+
         if (queryResponse.matches && queryResponse.matches.length > 0) {
             return queryResponse.matches
                 .filter(m => m.score > 0.6) // Higher threshold for memories
@@ -259,7 +260,7 @@ async function extractAndSaveMemory(chatId, userId, conversation) {
             { key: 'weakness', regex: /(?:weak|struggle|difficult|hard for me)\s+(.+?)(?:\.|$)/i },
             { key: 'strength', regex: /(?:good at|strong in|excel at)\s+(.+?)(?:\.|$)/i }
         ];
-        
+
         for (const pattern of patterns) {
             const match = conversation.match(pattern.regex);
             if (match && match[1]) {
@@ -291,13 +292,13 @@ async function extractAndSaveMemory(chatId, userId, conversation) {
 // Get user memories
 async function getUserMemories(chatId, userId) {
     try {
-        const memories = await Memory.find({ 
-            $or: [{ chatId }, { userId }] 
+        const memories = await Memory.find({
+            $or: [{ chatId }, { userId }]
         })
-        .sort({ importance: -1, timestamp: -1 })
-        .limit(10)
-        .lean();
-        
+            .sort({ importance: -1, timestamp: -1 })
+            .limit(10)
+            .lean();
+
         if (memories.length > 0) {
             return memories.map(m => `${m.key}: ${m.value}`).join('\n');
         }
@@ -373,7 +374,7 @@ const MODELS = [
 async function callWithFallback(fnGenerator) {
     let lastError = null;
     let quotaExhausted = false;
-    
+
     for (const modelName of MODELS) {
         try {
             // fnGenerator takes a modelName and returns a Promise
@@ -382,15 +383,15 @@ async function callWithFallback(fnGenerator) {
             lastError = e;
             const errorMsg = e.message || '';
             const errorStatus = e.status || '';
-            
+
             console.warn(`⚠️ Model ${modelName} Failed: ${errorMsg.substring(0, 100)}`);
-            
+
             // If it's a 404 (model not found), skip to next model immediately
             if (isModelNotFoundError(e)) {
                 console.log(`⏭️  Model ${modelName} not available, trying next...`);
                 continue;
             }
-            
+
             // If it's a quota error, try rotating key and wait
             if (isQuotaError(e)) {
                 console.log(`⏳ Quota error for ${modelName}, rotating key and waiting...`);
@@ -401,7 +402,7 @@ async function callWithFallback(fnGenerator) {
                 quotaExhausted = true;
                 continue; // Try next model
             }
-            
+
             // For other errors (400, 500, etc.), continue to next model
             if (modelName === MODELS[MODELS.length - 1]) {
                 // Last model failed
@@ -409,7 +410,7 @@ async function callWithFallback(fnGenerator) {
             }
         }
     }
-    
+
     // If we get here, all models failed
     if (quotaExhausted) {
         throw new Error("All API keys have exceeded quota. Please wait or upgrade your plan.");
@@ -420,15 +421,15 @@ async function callWithFallback(fnGenerator) {
 // Keep simple retry for Embeddings as they have only 1 model
 async function callWithRetry(fn, retries = 3) {
     for (let i = 0; i < retries; i++) {
-        try { 
-            return await fn(); 
+        try {
+            return await fn();
         } catch (e) {
             if (isQuotaError(e)) {
                 console.log(`⏳ Embedding quota error, attempt ${i + 1}/${retries}`);
                 rotateKey();
                 const retryDelay = extractRetryDelay(e);
                 const backoffDelay = Math.max(retryDelay * 1000, 2000 * (i + 1));
-                console.log(`⏰ Waiting ${backoffDelay/1000}s before retry...`);
+                console.log(`⏰ Waiting ${backoffDelay / 1000}s before retry...`);
                 await sleep(backoffDelay);
             } else {
                 throw e;
@@ -487,21 +488,21 @@ async function extractPdfText(pdfBuffer) {
 
 async function generateQuizFromPdfBuffer({ pdfBuffer, topic = 'General', qty = 10, difficulty = 'medium' }) {
     if (!pdfBuffer || pdfBuffer.length === 0) throw new Error("PDF Buffer empty");
-    
+
     // Extract PDF text first to help with topic filtering and validation
     let pdfText = '';
     let pdfTopics = [];
     try {
         pdfText = await extractPdfText(pdfBuffer);
         console.log(`📄 Extracted ${pdfText.length} characters from PDF`);
-        
+
         // Check if PDF contains the requested topic (basic keyword matching)
         if (topic && topic !== 'General' && topic !== 'PDF Content' && pdfText.length > 0) {
             const topicLower = topic.toLowerCase();
             const pdfLower = pdfText.toLowerCase();
             const topicWords = topicLower.split(/\s+/);
             const foundMatches = topicWords.filter(word => word.length > 3 && pdfLower.includes(word));
-            
+
             if (foundMatches.length === 0) {
                 console.warn(`⚠️ Topic "${topic}" may not be found in PDF. Proceeding anyway...`);
             } else {
@@ -512,9 +513,9 @@ async function generateQuizFromPdfBuffer({ pdfBuffer, topic = 'General', qty = 1
         console.warn("Could not extract PDF text for topic filtering:", e.message);
         // Continue anyway - AI model can still process the PDF
     }
-    
+
     // Enhanced prompt with explicit topic filtering instructions
-    const topicFilter = topic && topic !== 'General' && topic !== 'PDF Content' 
+    const topicFilter = topic && topic !== 'General' && topic !== 'PDF Content'
         ? `🚨 CRITICAL INSTRUCTIONS - READ CAREFULLY:
 
 This PDF contains multiple topics. Your task:
@@ -529,7 +530,7 @@ This PDF contains multiple topics. Your task:
 Topic to filter: "${topic}"
 You MUST access and read the entire PDF content to find this topic.`
         : `Read the ENTIRE PDF carefully from start to finish. Extract questions from all topics in the PDF.`;
-    
+
     const finalPrompt = `You are a quiz generator. ${topicFilter}
 
 Generate exactly ${qty} multiple-choice questions from the PDF.
@@ -560,13 +561,13 @@ Output STRICT JSON format (no markdown, no code blocks):
     if (!pdfBuffer || pdfBuffer.length === 0) {
         throw new Error("PDF buffer is empty or invalid");
     }
-    
+
     // Validate PDF buffer size (max 20MB for Gemini API)
     const maxSize = 20 * 1024 * 1024; // 20MB
     if (pdfBuffer.length > maxSize) {
         throw new Error(`PDF is too large (${(pdfBuffer.length / 1024 / 1024).toFixed(2)}MB). Maximum size is 20MB.`);
     }
-    
+
     // Convert PDF to base64
     let pdfBase64;
     try {
@@ -577,12 +578,12 @@ Output STRICT JSON format (no markdown, no code blocks):
     } catch (e) {
         throw new Error(`PDF encoding error: ${e.message}`);
     }
-    
+
     const contentParts = [
-        { text: finalPrompt }, 
+        { text: finalPrompt },
         { inlineData: { data: pdfBase64, mimeType: 'application/pdf' } }
     ];
-    
+
     console.log(`📤 Sending PDF to AI (${pdfBuffer.length} bytes, ${(pdfBuffer.length / 1024).toFixed(2)}KB) with topic filter: "${topic}"`);
     let result;
     try {
@@ -601,17 +602,17 @@ Output STRICT JSON format (no markdown, no code blocks):
 
     // Enhanced JSON extraction with multiple attempts
     let jsonText = result.response.text();
-    
+
     // Remove markdown code blocks if present
     jsonText = jsonText.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-    
+
     // Try to find JSON object
     const jsonMatch = jsonText.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
         console.error("No JSON found in response:", jsonText.substring(0, 200));
         throw new Error("No valid JSON found in AI response");
     }
-    
+
     let data;
     try {
         data = JSON.parse(jsonMatch[0]);
@@ -620,17 +621,17 @@ Output STRICT JSON format (no markdown, no code blocks):
         console.error("Attempted to parse:", jsonMatch[0].substring(0, 200));
         throw new Error("Failed to parse quiz JSON from AI response");
     }
-    
+
     let questions = data.quizzes || data.questions || [];
-    
+
     if (!Array.isArray(questions) || questions.length === 0) {
         throw new Error(`No questions generated for topic "${topic}". The PDF may not contain relevant content.`);
     }
-    
+
     // Validate and normalize questions
     const validatedQuestions = questions.map((q, idx) => {
         let options = q.options || ["True", "False"];
-        
+
         // Ensure exactly 4 options
         if (options.length !== 4) {
             console.warn(`Question ${idx + 1} has ${options.length} options, expected 4. Padding or trimming.`);
@@ -639,7 +640,7 @@ Output STRICT JSON format (no markdown, no code blocks):
             }
             options = options.slice(0, 4);
         }
-        
+
         let cIndex = -1;
         if (typeof q.correctAnswer === 'number') cIndex = q.correctAnswer;
         if (cIndex === -1 && typeof q.correctAnswer === 'string') {
@@ -655,7 +656,7 @@ Output STRICT JSON format (no markdown, no code blocks):
             console.warn(`Question ${idx + 1}: Invalid correct_index, defaulting to 0`);
             cIndex = 0;
         }
-        
+
         return {
             question: (q.questionText || q.question || `Question ${idx + 1}`).trim(),
             options: options.map(opt => String(opt).trim()),
@@ -663,11 +664,11 @@ Output STRICT JSON format (no markdown, no code blocks):
             answer_explanation: (q.explanation || q.answer_explanation || "No explanation provided").trim()
         };
     }).filter(q => q.question && q.question.length > 0); // Remove empty questions
-    
+
     if (validatedQuestions.length === 0) {
         throw new Error(`No valid questions generated for topic "${topic}".`);
     }
-    
+
     return validatedQuestions.slice(0, qty);
 }
 
@@ -719,7 +720,7 @@ async function sendMockTestSummaryWithAnswers(chat, chatId) {
 async function runQuizStep(chat, chatId) {
     const session = quizSessions.get(chatId);
     if (!session || !session.active) return;
-    
+
     if (session.index >= session.questions.length) {
         let report = `🏆 *RANK LIST* 🏆\n*Subject:* ${session.topic}\n──────────────────\n`;
         const sorted = [...session.scores.entries()].sort((a, b) => b[1] - a[1]);
@@ -730,7 +731,7 @@ async function runQuizStep(chat, chatId) {
         report += `──────────────────`;
         await chat.sendMessage(report, { mentions: sorted.map(s => s[0]) });
         await sendMockTestSummaryWithAnswers(chat, chatId);
-        
+
         // Cleanup: Clear all timeouts before deleting session
         if (session.timeoutIds) {
             session.timeoutIds.forEach(id => clearTimeout(id));
@@ -741,7 +742,7 @@ async function runQuizStep(chat, chatId) {
 
     // Record the exact time when we start sending the question
     const questionStartTime = Date.now();
-    
+
     const q = session.questions[session.index];
     const poll = new Poll(`Q${session.index + 1}: ${q.question}`, q.options, { allowMultipleAnswers: false });
     const sentMsg = await chat.sendMessage(poll);
@@ -749,24 +750,24 @@ async function runQuizStep(chat, chatId) {
 
     // Calculate how long it took to send the message
     const messageSendTime = Date.now() - questionStartTime;
-    
+
     // Calculate precise delay: timer duration minus time already spent
     // Ensure minimum 100ms delay to prevent issues
     const preciseDelay = Math.max(100, (session.timer * 1000) - messageSendTime);
-    
+
     // Store timeout ID for potential cancellation
     const timeoutId = setTimeout(() => {
         if (!quizSessions.has(chatId)) return;
         activePolls.delete(sentMsg.id.id);
         session.index++;
-        
+
         // Immediately proceed to next question without additional delay
         // This ensures precise timing
         runQuizStep(chat, chatId).catch(err => {
             console.error("Error in runQuizStep:", err);
         });
     }, preciseDelay);
-    
+
     // Store timeout ID in session for potential cleanup
     if (!session.timeoutIds) session.timeoutIds = [];
     session.timeoutIds.push(timeoutId);
@@ -806,7 +807,7 @@ async function extractPollOrQuestionContent(msg) {
             const quotedMsg = await msg.getQuotedMessage();
             console.log("📋 Quoted message type:", quotedMsg.type);
             console.log("📋 Quoted message hasPoll:", quotedMsg.hasPoll);
-            
+
             // Check if quoted message is a poll
             if (quotedMsg.hasPoll) {
                 const poll = quotedMsg.poll;
@@ -819,26 +820,26 @@ async function extractPollOrQuestionContent(msg) {
                 console.log("✅ Extracted poll content:", pollContent.substring(0, 100));
                 return pollContent;
             }
-            
+
             // Check if quoted message contains a question (MCQ format)
             const quotedBody = quotedMsg.body || '';
             console.log("📋 Quoted message body:", quotedBody.substring(0, 100));
-            
+
             // Check for various question formats
             if (quotedBody.match(/^[Qq]\d*[.:]\s*.+\?/)) {
                 return quotedBody;
             }
-            
+
             // Check for MCQ format with options
             if (quotedBody.match(/[A-D][).]\s*.+/)) {
                 return quotedBody;
             }
-            
+
             // Return quoted message body if it looks like a question
             if (quotedBody.includes('?') && quotedBody.length > 10) {
                 return quotedBody;
             }
-            
+
             // Try to get poll from message metadata
             try {
                 const quotedData = quotedMsg._data;
@@ -858,7 +859,7 @@ async function extractPollOrQuestionContent(msg) {
                 console.log("⚠️ Could not extract poll from metadata:", metaError.message);
             }
         }
-        
+
         // Check if current message itself is a poll
         if (msg.hasPoll) {
             const poll = msg.poll;
@@ -870,7 +871,7 @@ async function extractPollOrQuestionContent(msg) {
             }
             return pollContent;
         }
-        
+
         return null;
     } catch (e) {
         console.error("Error extracting poll/question:", e);
@@ -884,10 +885,10 @@ function formatExamTutorResponse(questionContent, explanation, isPoll = false) {
     let correctAnswer = "";
     let mainExplanation = "";
     let keyPoints = [];
-    
+
     // Parse explanation to extract structured parts
     const lines = explanation.split('\n').filter(line => line.trim().length > 0);
-    
+
     // Find correct answer
     for (let i = 0; i < Math.min(5, lines.length); i++) {
         if (lines[i].match(/correct|answer|option [A-D]/i) || lines[i].match(/^[A-D][).]/)) {
@@ -899,38 +900,38 @@ function formatExamTutorResponse(questionContent, explanation, isPoll = false) {
     if (!correctAnswer && lines.length > 0) {
         correctAnswer = lines[0].substring(0, 80);
     }
-    
+
     // Extract main explanation (2-3 sentences, max 150 words)
     const sentences = explanation.split(/[.!?]+/).filter(s => s.trim().length > 15);
     mainExplanation = sentences.slice(0, 3).join('. ').trim();
     if (mainExplanation.length > 200) {
         mainExplanation = mainExplanation.substring(0, 200) + '...';
     }
-    
+
     // Extract key points (bullet points or numbered)
-    keyPoints = lines.filter(line => 
-        line.trim().match(/^[•\-\*]/) || 
+    keyPoints = lines.filter(line =>
+        line.trim().match(/^[•\-\*]/) ||
         line.trim().match(/^[0-9]+[.)]/) ||
         line.toLowerCase().includes('key') ||
         line.toLowerCase().includes('important')
     ).slice(0, 3);
-    
+
     // Build attractive, concise response
     let response = `╔═══════════════════════════╗\n`;
     response += `║  🎓 *EXAM EXPLANATION*  ║\n`;
     response += `╚═══════════════════════════╝\n\n`;
-    
+
     if (isPoll && questionContent) {
         response += `📋 *Question:*\n`;
         response += `\`\`\`${questionContent.substring(0, 150)}\`\`\`\n\n`;
     }
-    
+
     response += `✅ *ANSWER:*\n`;
     response += `\`\`\`${correctAnswer || "See explanation below"}\`\`\`\n\n`;
-    
+
     response += `💡 *EXPLANATION:*\n`;
     response += `${mainExplanation || explanation.substring(0, 200)}\n\n`;
-    
+
     if (keyPoints.length > 0) {
         response += `🔑 *KEY POINTS:*\n`;
         keyPoints.forEach((point, idx) => {
@@ -941,10 +942,10 @@ function formatExamTutorResponse(questionContent, explanation, isPoll = false) {
         });
         response += `\n`;
     }
-    
+
     response += `━━━━━━━━━━━━━━━━━━━━\n`;
     response += `💪 *Keep practicing!* You've got this! 🚀`;
-    
+
     return response;
 }
 
@@ -956,20 +957,20 @@ async function handleMessage(msg) {
         // Check if user is replying to a poll/question
         const pollContent = await extractPollOrQuestionContent(msg);
         const isPollReply = pollContent !== null;
-        
+
         // STRICT GATEKEEPER
         if (chat.isGroup) {
             const isTagged = msg.mentionedIds.includes(client.info.wid._serialized) || msg.body.includes("@");
-            const hasSession = quizSessions.has(chat.id._serialized);
-            
+            const hasSession = quizEngine.isQuizActive(chat.id._serialized);
+
             // Allow poll replies even if not tagged
             if (!isTagged && !isPollReply) {
-                if (!hasSession) { 
-                    console.log("⛔ Gatekeeper: Ignore Group msg (No Tag/Session/Poll)"); 
-                    return; 
+                if (!hasSession) {
+                    console.log("⛔ Gatekeeper: Ignore Group msg (No Tag/Session/Poll)");
+                    return;
                 }
                 if (!msg.body.trim().match(/^[a-dA-D1-4]$/) && !msg.body.toLowerCase().includes("stop")) {
-                    console.log("⛔ Gatekeeper: Ignore Group msg (Invalid Input)"); 
+                    console.log("⛔ Gatekeeper: Ignore Group msg (Invalid Input)");
                     return;
                 }
             }
@@ -978,13 +979,13 @@ async function handleMessage(msg) {
 
         let prompt = sanitizeHtml(msg.body.replace(/@\S+/g, "").trim());
         const user = await updateUserProfile(msg.from, msg._data.notifyName);
-        
+
         // Handle poll/question explanation request
         if (isPollReply || prompt.toLowerCase().includes("explain") || prompt.toLowerCase().includes("solution") || prompt.toLowerCase().includes("answer")) {
             await msg.reply("⚡ Quick analysis...");
-            
+
             // Combine poll content with user's request
-            const fullPrompt = pollContent 
+            const fullPrompt = pollContent
                 ? `You are an expert exam tutor. Explain this MCQ in MAX 100 words - be SUPER CONCISE:
 
 ${pollContent}
@@ -998,7 +999,7 @@ Format (BE BRIEF):
 
 Keep it SHORT, CLEAR, EASY TO READ. No long paragraphs!`
                 : `As exam tutor, explain this in MAX 100 words - be CONCISE: ${prompt}`;
-            
+
             // Get explanation from AI
             let explanation = "";
             try {
@@ -1011,12 +1012,12 @@ Keep it SHORT, CLEAR, EASY TO READ. No long paragraphs!`
                     if (!sessionHistory || sessionHistory.length === 0) {
                         sessionHistory = await loadChatHistory(chat.id._serialized);
                     }
-                    
+
                     const chatSession = model.startChat({
                         history: [
-                            { 
-                                role: "user", 
-                                parts: [{ 
+                            {
+                                role: "user",
+                                parts: [{
                                     text: `You are an exam tutor. CRITICAL RULES:
 1. MAX 100 WORDS per response - BE CONCISE!
 2. Use simple, clear language
@@ -1030,7 +1031,7 @@ Format:
 💡 Why: [2-3 short sentences]
 🔑 Key: [1 important concept]
 
-Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!` 
+Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!`
                                 }],
                             },
                             ...(sessionHistory || [])
@@ -1040,11 +1041,11 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                     const result = await chatSession.sendMessage(finalPrompt);
                     explanation = result.response.text();
                 });
-                
+
                 // Format the response as exam tutor explanation
                 const formattedResponse = formatExamTutorResponse(pollContent, explanation, isPollReply);
                 await msg.reply(formattedResponse);
-                
+
                 // Extract and save memories
                 const fullConversation = `${fullPrompt}\n${explanation}`;
                 extractAndSaveMemory(
@@ -1052,7 +1053,7 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                     user.userId || chat.id._serialized.split('@')[0],
                     fullConversation
                 ).catch(err => console.error("Memory extraction error:", err));
-                
+
                 await updateHistory(chat.id._serialized, "user", fullPrompt, user.userId || chat.id._serialized.split('@')[0]);
                 await updateHistory(chat.id._serialized, "model", explanation, user.userId || chat.id._serialized.split('@')[0]);
                 return;
@@ -1070,18 +1071,18 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
         if (msg.hasMedia) {
             const media = await msg.downloadMedia();
             console.log(`📎 Media received: ${media.mimetype}, prompt: ${prompt.substring(0, 50)}`);
-            
+
             // Priority 1: PDF Quiz Generation
             if (media.mimetype === 'application/pdf' && (
-                prompt.toLowerCase().includes("quiz") || 
-                prompt.toLowerCase().includes("test") || 
+                prompt.toLowerCase().includes("quiz") ||
+                prompt.toLowerCase().includes("test") ||
                 prompt.toLowerCase().includes("mock") ||
                 prompt.toLowerCase().includes("question") ||
                 prompt.toLowerCase().includes("generate")
             )) {
                 await msg.reply("📄 Analyzing PDF and generating quiz...");
                 const pdfBuffer = Buffer.from(media.data, 'base64');
-                
+
                 // Enhanced timer parsing - supports multiple formats
                 let timer = 30; // default 30 seconds
                 const timePatterns = [
@@ -1091,7 +1092,7 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                     /(\d+)\s*(?:s|sec|second|seconds)/i,
                     /(\d+)\s*(?:m|min|minute|minutes)/i
                 ];
-                
+
                 for (const pattern of timePatterns) {
                     const match = prompt.match(pattern);
                     if (match) {
@@ -1107,7 +1108,7 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                         break;
                     }
                 }
-                
+
                 // Enhanced topic extraction - look for topic keywords
                 let topic = "PDF Content"; // default
                 const topicPatterns = [
@@ -1117,7 +1118,7 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                     /subject\s*[:=]\s*["']?([^"'\n]+)["']?/i,
                     /quiz\s+(?:on|about|for)\s+["']?([^"'\n]+)["']?/i
                 ];
-                
+
                 for (const pattern of topicPatterns) {
                     const match = prompt.match(pattern);
                     if (match && match[1]) {
@@ -1129,58 +1130,48 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                         }
                     }
                 }
-                
+
                 // Extract quantity if specified
                 let qty = 10; // default
                 const qtyMatch = prompt.match(/(\d+)\s*(?:questions?|q|qty|quantity)/i);
                 if (qtyMatch) {
                     qty = Math.max(1, Math.min(50, parseInt(qtyMatch[1])));
                 }
-                
+
                 // Extract difficulty if specified
                 let difficulty = 'medium';
                 if (prompt.match(/\b(easy|simple|beginner)\b/i)) difficulty = 'easy';
                 else if (prompt.match(/\b(hard|difficult|advanced|expert)\b/i)) difficulty = 'hard';
-                
+
                 // Validate PDF buffer before processing
                 if (!pdfBuffer || pdfBuffer.length === 0) {
                     await msg.reply("❌ PDF file is empty or corrupted. Please send a valid PDF file.");
                     return;
                 }
-                
+
                 console.log(`📄 Processing PDF: ${(pdfBuffer.length / 1024).toFixed(2)}KB, Topic: "${topic}", Timer: ${timer}s, Qty: ${qty}`);
-                
+
                 try {
                     await msg.reply(`🔍 Reading PDF and searching for "${topic}" questions...`);
-                    
-                    const questions = await generateQuizFromPdfBuffer({ 
-                        pdfBuffer, 
-                        topic: topic, 
+
+                    const questions = await quizEngine.generateQuizFromPdfBuffer({
+                        pdfBuffer,
+                        topic: topic,
                         qty: qty,
                         difficulty: difficulty
                     });
-                    
+
                     if (questions.length === 0) {
                         await msg.reply(`❌ No questions found for topic "${topic}" in the PDF.\n\n💡 Try:\n• Different topic name\n• Check if PDF contains "${topic}" content\n• Use "PDF Content" for general quiz`);
                         return;
                     }
-                    
+
                     await msg.reply(`✅ Generated ${questions.length} questions on "${topic}"\n⏱️ Timer: ${timer}s per question\n\n🎯 Starting quiz now!`);
-                    quizSessions.set(chat.id._serialized, { 
-                        questions, 
-                        index: 0, 
-                        timer, 
-                        active: true, 
-                        scores: new Map(), 
-                        creditedVotes: new Set(), 
-                        topic: topic,
-                        timeoutIds: []
-                    });
-                    runQuizStep(chat, chat.id._serialized);
+                    quizEngine.startQuiz(chat, chat.id._serialized, questions, topic, timer);
                 } catch (e) {
                     console.error("PDF Quiz Generation Error:", e);
                     const errorMsg = e.message || 'Unknown error';
-                    
+
                     // Provide specific error messages
                     if (errorMsg.includes("empty") || errorMsg.includes("invalid")) {
                         await msg.reply(`❌ PDF Error: ${errorMsg}\n\nPlease send a valid PDF file.`);
@@ -1194,7 +1185,7 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                 }
                 return;
             }
-            
+
             // Priority 2: PDF Learning (save to Pinecone)
             if (media.mimetype === 'application/pdf' && prompt.toLowerCase().includes("learn")) {
                 await msg.reply("🧠 Processing PDF for learning...");
@@ -1217,7 +1208,7 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                 }
                 return;
             }
-            
+
             // Handle other media types (text files, etc.)
             if (prompt.toLowerCase().includes("learn")) {
                 await msg.reply("🧠 Memorizing...");
@@ -1241,11 +1232,11 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
 
         // Handle manual quiz creation with custom questions
         if (prompt.toLowerCase().includes("create quiz") || prompt.toLowerCase().includes("manual quiz")) {
-            if (quizSessions.has(chat.id._serialized)) { 
-                await msg.reply("⚠️ Quiz already active. Type 'stop quiz' to end it first."); 
-                return; 
+            if (quizEngine.isQuizActive(chat.id._serialized)) {
+                await msg.reply("⚠️ Quiz already active. Type 'stop quiz' to end it first.");
+                return;
             }
-            
+
             // Parse timer from command
             let timer = 30;
             const timePatterns = [
@@ -1253,7 +1244,7 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                 /every\s+(\d+)\s*(second|sec|s|minute|min|m)/i,
                 /(\d+)\s*(second|sec|s|minute|min|m)\s*(?:timer|interval)/i
             ];
-            
+
             for (const pattern of timePatterns) {
                 const match = prompt.match(pattern);
                 if (match) {
@@ -1264,80 +1255,73 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                     break;
                 }
             }
-            
+
             await msg.reply(`📝 Please send your questions in the following format:\n\nQ1. Question text?\nA) Option 1\nB) Option 2\nC) Option 3\nD) Option 4\nCorrect: A\n\nOr send multiple questions separated by "---". Timer: ${timer}s per question.\n\nType "done" when finished, or "cancel" to cancel.`);
-            
+
             // Store pending quiz creation state
             if (!chat.pendingQuiz) chat.pendingQuiz = { timer, questions: [], waitingForInput: true };
             return;
         }
-        
+
+        // Handle quiz cancellation
         // Handle quiz cancellation
         if (prompt.toLowerCase().includes("cancel quiz") || prompt.toLowerCase().includes("stop quiz")) {
-            if (quizSessions.has(chat.id._serialized)) {
-                const session = quizSessions.get(chat.id._serialized);
-                // Clear all timeouts
-                if (session.timeoutIds) {
-                    session.timeoutIds.forEach(id => clearTimeout(id));
-                }
-                session.active = false;
-                quizSessions.delete(chat.id._serialized);
+            if (quizEngine.stopQuiz(chat.id._serialized)) {
                 await msg.reply("✅ Quiz stopped.");
             } else {
                 await msg.reply("ℹ️ No active quiz to stop.");
             }
             return;
         }
-        
+
         // Handle general quiz requests - ONLY if explicitly requested
         const quizKeywords = ["daily polls", "start quiz", "general quiz", "quick quiz", "mock test"];
         const isExplicitQuizRequest = quizKeywords.some(keyword => prompt.toLowerCase().includes(keyword));
-        
+
         if (isExplicitQuizRequest && !msg.hasMedia && !prompt.toLowerCase().includes("create") && !prompt.toLowerCase().includes("manual") && !prompt.toLowerCase().includes("pdf")) {
-            if (quizSessions.has(chat.id._serialized)) { 
-                await msg.reply("⚠️ Quiz already active. Type 'stop quiz' to end it first."); 
-                return; 
+            if (quizEngine.isQuizActive(chat.id._serialized)) {
+                await msg.reply("⚠️ Quiz already active. Type 'stop quiz' to end it first.");
+                return;
             }
             await msg.reply("🎲 Starting General Quiz...");
             const questions = [
                 { question: "What is the capital of India?", options: ["Mumbai", "Delhi", "Chennai", "Kolkata"], correct_index: 1, answer_explanation: "New Delhi is the capital." },
                 { question: "2 + 2 = ?", options: ["3", "4", "5", "6"], correct_index: 1, answer_explanation: "Basic arithmetic." }
             ];
-            quizSessions.set(chat.id._serialized, { 
-                questions, 
-                index: 0, 
-                timer: 30, 
-                active: true, 
-                scores: new Map(), 
-                creditedVotes: new Set(), 
-                topic: "General",
-                timeoutIds: []
-            });
-            runQuizStep(chat, chat.id._serialized);
+            quizEngine.startQuiz(chat, chat.id._serialized, questions, "General", 30);
             return;
         }
 
         const isVoice = msg.type === 'ptt' || msg.type === 'audio' || prompt.includes("speak");
 
         console.log("🔍 Starting memory retrieval...");
-        
+
         // Get multiple types of context
         const [ragContext, relevantMemories, userMemories] = await Promise.all([
             queryPinecone(prompt), // Document/PDF context
             getRelevantMemories(prompt, chat.id._serialized), // Past conversations
             getUserMemories(chat.id._serialized, user.userId || chat.id._serialized.split('@')[0]) // User facts
         ]);
-        
+
         // Combine all context
         let contextParts = [];
         if (ragContext) contextParts.push(`📚 Study Materials:\n${ragContext}`);
         if (relevantMemories.length > 0) contextParts.push(`💭 Relevant Past Conversations:\n${relevantMemories.join('\n\n')}`);
         if (userMemories) contextParts.push(`👤 User Information:\n${userMemories}`);
-        
+
         const context = contextParts.length > 0 ? contextParts.join('\n\n') : null;
         console.log("📚 Memory context retrieved. Starting AI response...");
 
         let responseText = "";
+
+        // Detect if it's an MCQ/poll question (needs UPSC formatting)
+        const isMCQ = prompt.match(/\?/) && (
+            prompt.match(/^[A-D][).]\s*.+/) ||
+            prompt.match(/option [A-D]/i) ||
+            prompt.match(/choose|select|which.*correct/i) ||
+            isPollReply
+        );
+
         try {
             await callWithFallback(async (modelName) => {
                 if (!genAI) rotateKey();
@@ -1348,25 +1332,18 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                 if (!sessionHistory || sessionHistory.length === 0) {
                     sessionHistory = await loadChatHistory(chat.id._serialized);
                 }
-                
+
                 // Get user memories for context
                 const userMemories = await getUserMemories(chat.id._serialized, user.userId || chat.id._serialized.split('@')[0]);
                 const memoryContext = userMemories ? `\n\nRemember about this user: ${userMemories}` : '';
-                
-                // Detect if it's an MCQ/poll question (needs UPSC formatting)
-                const isMCQ = prompt.match(/\?/) && (
-                    prompt.match(/^[A-D][).]\s*.+/) || 
-                    prompt.match(/option [A-D]/i) ||
-                    prompt.match(/choose|select|which.*correct/i) ||
-                    isPollReply
-                );
-                
+
+
                 const chatSession = model.startChat({
                     history: [
-                        { 
-                            role: "user", 
-                            parts: [{ 
-                                text: isMCQ 
+                        {
+                            role: "user",
+                            parts: [{
+                                text: isMCQ
                                     ? `You are an exam tutor for UPSC/SSC/government exams. For MCQs/polls, provide structured explanation in MAX 100 words:
 
 Format for MCQs/Polls:
@@ -1385,21 +1362,21 @@ Guidelines:
 - Be engaging and human-like
 - Remember past conversations${memoryContext}
 
-Don't force a rigid format - adapt to the question type naturally.` 
+Don't force a rigid format - adapt to the question type naturally.`
                             }],
                         },
                         ...(sessionHistory || [])
                     ]
                 });
-                
+
                 // Enhance prompt based on question type
                 let enhancedPrompt = prompt;
-                
+
                 // Only format MCQs/polls specially
                 if (isMCQ) {
                     enhancedPrompt = `As an exam tutor, explain this MCQ/poll in MAX 100 words:\n${prompt}`;
                 }
-                
+
                 const finalPrompt = context ? `Relevant context:\n${context}\n\nUser's question: ${enhancedPrompt}` : enhancedPrompt;
                 const result = await chatSession.sendMessage(finalPrompt);
                 responseText = result.response.text();
@@ -1408,7 +1385,7 @@ Don't force a rigid format - adapt to the question type naturally.`
         } catch (err) {
             console.error("🔥 All Models Failed:", err);
             const errorMsg = err.message || '';
-            
+
             // Provide user-friendly error messages
             if (errorMsg.includes("quota") || errorMsg.includes("Quota exceeded")) {
                 await msg.reply("⚠️ API quota exceeded. Please wait a few minutes or contact the administrator.");
@@ -1421,15 +1398,15 @@ Don't force a rigid format - adapt to the question type naturally.`
         }
 
         console.log("📤 Sending Reply...");
-        
+
         // Extract and save important memories from conversation
         const fullConversation = `${prompt}\n${responseText}`;
         extractAndSaveMemory(
-            chat.id._serialized, 
+            chat.id._serialized,
             user.userId || chat.id._serialized.split('@')[0],
             fullConversation
         ).catch(err => console.error("Memory extraction error:", err));
-        
+
         // Save to persistent memory
         await updateHistory(chat.id._serialized, "user", prompt, user.userId || chat.id._serialized.split('@')[0]);
         await updateHistory(chat.id._serialized, "model", responseText, user.userId || chat.id._serialized.split('@')[0]);
@@ -1460,7 +1437,7 @@ Don't force a rigid format - adapt to the question type naturally.`
 // --- INITIALIZATION ---
 async function startClient() {
     console.log('🔄 Starting bot initialization...');
-    
+
     // Connect to MongoDB (don't block if it fails, but log error)
     console.log('🔄 Connecting to MongoDB...');
     mongoose.connect(MONGODB_URI, {
@@ -1488,7 +1465,7 @@ async function startClient() {
         headless: true,
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
     };
-    
+
     if (process.platform === 'win32') {
         puppetConfig.executablePath = `${process.env.LOCALAPPDATA}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`;
         puppetConfig.headless = false;
@@ -1506,31 +1483,31 @@ async function startClient() {
             puppeteer: puppetConfig
         });
 
-        client.on('qr', (qr) => { 
-            qrCodeData = qr; 
-            qrcode.generate(qr, { small: true }); 
-            console.log("⚡ SCAN QR CODE TO CONNECT"); 
+        client.on('qr', (qr) => {
+            qrCodeData = qr;
+            qrcode.generate(qr, { small: true });
+            console.log("⚡ SCAN QR CODE TO CONNECT");
         });
-        
-        client.on('ready', () => { 
-            console.log("✅✅✅ BOT IS READY! ✅✅✅"); 
+
+        client.on('ready', () => {
+            console.log("✅✅✅ BOT IS READY! ✅✅✅");
             console.log("✅ WhatsApp Connected Successfully");
-            qrCodeData = ""; 
+            qrCodeData = "";
         });
-        
+
         client.on('authenticated', () => {
             console.log("🔐 Authentication successful");
         });
-        
+
         client.on('auth_failure', (msg) => {
             console.error("❌ Authentication failed:", msg);
         });
-        
+
         client.on('disconnected', (reason) => {
             console.log("⚠️ Client disconnected:", reason);
         });
-        
-        client.on('vote_update', handleVote);
+
+        client.on('vote_update', (vote) => quizEngine.handleVote(vote));
         client.on('message', handleMessage);
         client.on('remote_session_saved', () => console.log('💾 Session saved to database'));
 
