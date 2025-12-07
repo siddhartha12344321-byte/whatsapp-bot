@@ -36,7 +36,7 @@ const indexName = 'whatsapp-bot';
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb+srv://amurag12344321_db_user:78mbO8WPw69AeTpt@siddharthawhatsappbot.wfbdgjf.mongodb.net/?appName=SiddharthaWhatsappBot";
 const PINECONE_API_KEY = process.env.PINECONE_API_KEY || 'pcsk_4YGs7G_FB4bw1RbEejhHeiwEeL8wrU2vS1vQfFS2TcdhxJjsrehCHMyeFtHw4cHJkWPZvc';
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || 'sk-yyidxx41e0c3b87c4a5be61bff3e3f02'; // DeepSeek-VL for image analysis
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || 'sk-ea2ebc0b968a4c959f24340beeda43a3';
 
 // Validate API Keys on startup
 console.log("🔑 Checking required API keys...");
@@ -47,7 +47,7 @@ if (!PINECONE_API_KEY) {
     console.warn("⚠️ PINECONE_API_KEY not set in environment - some features may not work");
 }
 if (!DEEPSEEK_API_KEY) {
-    console.warn("⚠️ DEEPSEEK_API_KEY not set - image analysis may not work");
+    console.warn("⚠️ DEEPSEEK_API_KEY not set - image analysis will not work. Add it to Render environment.");
 }
 
 // --- CONNECTIONS ---
@@ -930,17 +930,17 @@ async function runQuizStep(chat, chatId) {
 }
 
 async function handleImageGeneration(msg, prompt) {
-    await msg.reply("🎨 Drawing...");
+    await msg.reply("🎨 Drawing...").catch(() => {});
     try {
         const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?nologo=true`;
         const media = await MessageMedia.fromUrl(url, { unsafeMime: true });
-        await msg.reply(media);
-    } catch (e) { console.error(e); await msg.reply("❌ Image Gen Failed"); }
+        await msg.reply(media).catch(() => {});
+    } catch (e) { console.error(e); await msg.reply("❌ Image Gen Failed").catch(() => {}); }
 }
 
 async function handleWebSearch(msg, query) {
     if (!process.env.TAVILY_API_KEY) return "No API Key";
-    await msg.reply("🕵️‍♂️ Searching...");
+    await msg.reply("🕵️‍♂️ Searching...").catch(() => {});
     try {
         const response = await fetch("https://api.tavily.com/search", {
             method: "POST",
@@ -950,7 +950,7 @@ async function handleWebSearch(msg, query) {
         const data = await response.json();
         let txt = data.answer ? `📝 ${data.answer}\n` : "";
         if (data.results) data.results.forEach(r => txt += `- [${r.title}](${r.url})\n`);
-        await msg.reply(txt || "No results");
+        await msg.reply(txt || "No results").catch(() => {});
         return txt;
     } catch (e) { return null; }
 }
@@ -1111,7 +1111,12 @@ async function handleMessage(msg) {
         const chat = await msg.getChat();
 
         // Check if user is replying to a poll/question
-        const pollContent = await extractPollOrQuestionContent(msg);
+        let pollContent = null;
+        try {
+            pollContent = await extractPollOrQuestionContent(msg);
+        } catch (pollErr) {
+            console.warn("⚠️ Poll extraction error (continuing):", pollErr.message?.substring(0, 50));
+        }
         const isPollReply = pollContent !== null;
 
         // STRICT GATEKEEPER
@@ -1138,7 +1143,7 @@ async function handleMessage(msg) {
 
         // Handle poll/question explanation request
         if (isPollReply || prompt.toLowerCase().includes("explain") || prompt.toLowerCase().includes("solution") || prompt.toLowerCase().includes("answer")) {
-            await msg.reply("⚡ Quick analysis...");
+            await msg.reply("⚡ Quick analysis...").catch(() => {});
 
             // Combine poll content with user's request
             const fullPrompt = pollContent
@@ -1194,7 +1199,7 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
 
                 // Format the response as exam tutor explanation
                 const formattedResponse = formatExamTutorResponse(pollContent, explanation, isPollReply);
-                await msg.reply(formattedResponse);
+                await msg.reply(formattedResponse).catch(() => {});
 
                 // Extract and save memories
                 const fullConversation = `${fullPrompt}\n${explanation}`;
@@ -1209,7 +1214,7 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                 return;
             } catch (err) {
                 console.error("Error generating explanation:", err);
-                await msg.reply("⚠️ Could not generate explanation at the moment. Please try again in a moment.");
+                await msg.reply("⚠️ Could not generate explanation at the moment. Please try again in a moment.").catch(() => {});
                 return;
             }
         }
@@ -1219,7 +1224,7 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
 
         // Priority 1: Topic Quiz Generation (Text-based)
         if (prompt.match(/\b(create|generate|make|start)\s+(?:a\s+)?(?:mock\s+)?(?:test|quiz|poll)/i) && !msg.hasMedia) {
-            await msg.reply("🧠 Analyzing request and generating quiz...");
+            await msg.reply("🧠 Analyzing request and generating quiz...").catch(() => {});
 
             // 1. Parse Timer
             let timer = 30; // default 30 seconds
@@ -1280,15 +1285,20 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                 });
 
                 if (questions.length === 0) {
-                    await msg.reply(`❌ Could not generate questions for "${topic}". Please try a simpler topic.`);
+                    await msg.reply(`❌ Could not generate questions for "${topic}". Please try a simpler topic.`).catch(() => {});
                     return;
                 }
 
-                await msg.reply(`✅ Generated ${questions.length} questions on "${topic}"\n⏱️ Timer: ${timer}s per question\n\n🎯 Starting quiz now!`);
-                quizEngine.startQuiz(chat, chat.id._serialized, questions, topic, timer);
+                await msg.reply(`✅ Generated ${questions.length} questions on "${topic}"\n⏱️ Timer: ${timer}s per question\n\n🎯 Starting quiz now!`).catch(() => {});
+                try {
+                    quizEngine.startQuiz(chat, chat.id._serialized, questions, topic, timer);
+                } catch (quizErr) {
+                    console.error("⚠️ Quiz start error:", quizErr.message?.substring(0, 80));
+                    await msg.reply("⚠️ Quiz starting... please wait.").catch(() => {});
+                }
             } catch (e) {
                 console.error("Topic Quiz Error:", e);
-                await msg.reply(`❌ Quiz Generation Error: ${e.message}`);
+                await msg.reply(`❌ Quiz Generation Error: ${e.message}`).catch(() => {});
             }
             return;
         }
@@ -1309,16 +1319,23 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                     const enhancedPrompt = `Image content: ${imageDescription}\n\nUser request: ${prompt}`;
                     
                     // Send to AI with enhanced context
-                    const response = await quizEngine.chat(enhancedPrompt, normalizeMessagesForGroq(chatHistory.get(chatId) || []));
-                    if (response) {
-                        updateHistory(chatId, 'user', enhancedPrompt);
-                        updateHistory(chatId, 'assistant', response);
-                        await msg.reply(response);
+                    try {
+                        const response = await quizEngine.chat(enhancedPrompt, normalizeMessagesForGroq(chatHistory.get(chatId) || []));
+                        if (response) {
+                            updateHistory(chatId, 'user', enhancedPrompt);
+                            updateHistory(chatId, 'assistant', response);
+                            await msg.reply(response).catch(replyErr => {
+                                console.warn("⚠️ Could not send reply:", replyErr.message?.substring(0, 50));
+                            });
+                        }
+                    } catch (groqErr) {
+                        console.error("❌ Groq error:", groqErr.message?.substring(0, 80));
+                        await msg.reply("⚠️ Thinking... please wait a moment.").catch(() => {});
                     }
                     return;
                 } catch (err) {
-                    console.error("❌ Image analysis failed:", err.message);
-                    await msg.reply("❌ Could not analyze image. Please describe it or try again.");
+                    console.error("❌ Image analysis error:", err.message?.substring(0, 80));
+                    await msg.reply("📷 Image received. Please describe what you need.").catch(() => {});
                     return;
                 }
             }
@@ -1331,31 +1348,32 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                 prompt.toLowerCase().includes("question") ||
                 prompt.toLowerCase().includes("generate")
             )) {
-                await msg.reply("📄 Analyzing PDF and generating quiz...");
-                const pdfBuffer = Buffer.from(media.data, 'base64');
+                try {
+                    await msg.reply("📄 Analyzing PDF and generating quiz...").catch(() => {});
+                    const pdfBuffer = Buffer.from(media.data, 'base64');
 
-                // Enhanced timer parsing - supports multiple formats
-                let timer = 30; // default 30 seconds
-                const timePatterns = [
-                    /every\s+(\d+)\s*(second|sec|s|minute|min|m)/i,
-                    /timer\s*[:=]\s*(\d+)\s*(second|sec|s|minute|min|m)/i,
-                    /(\d+)\s*(second|sec|s|minute|min|m)\s*(?:timer|interval|per\s+question)/i,
-                    /(\d+)\s*(?:s|sec|second|seconds)/i,
-                    /(\d+)\s*(?:m|min|minute|minutes)/i
-                ];
+                    // Enhanced timer parsing - supports multiple formats
+                    let timer = 30; // default 30 seconds
+                    const timePatterns = [
+                        /every\s+(\d+)\s*(second|sec|s|minute|min|m)/i,
+                        /timer\s*[:=]\s*(\d+)\s*(second|sec|s|minute|min|m)/i,
+                        /(\d+)\s*(second|sec|s|minute|min|m)\s*(?:timer|interval|per\s+question)/i,
+                        /(\d+)\s*(?:s|sec|second|seconds)/i,
+                        /(\d+)\s*(?:m|min|minute|minutes)/i
+                    ];
 
-                for (const pattern of timePatterns) {
-                    const match = prompt.match(pattern);
-                    if (match) {
-                        const value = parseInt(match[1]);
-                        const unit = (match[2] || match[0]).toLowerCase();
-                        if (unit.includes('m') || unit.includes('min')) {
-                            timer = value * 60;
-                        } else {
-                            timer = value;
-                        }
-                        // Ensure minimum 5 seconds and maximum 300 seconds (5 minutes)
-                        timer = Math.max(5, Math.min(300, timer));
+                    for (const pattern of timePatterns) {
+                        const match = prompt.match(pattern);
+                        if (match) {
+                            const value = parseInt(match[1]);
+                            const unit = (match[2] || match[0]).toLowerCase();
+                            if (unit.includes('m') || unit.includes('min')) {
+                                timer = value * 60;
+                            } else {
+                                timer = value;
+                            }
+                            // Ensure minimum 5 seconds and maximum 300 seconds (5 minutes)
+                            timer = Math.max(5, Math.min(300, timer));
                         break;
                     }
                 }
@@ -1396,14 +1414,14 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
 
                 // Validate PDF buffer before processing
                 if (!pdfBuffer || pdfBuffer.length === 0) {
-                    await msg.reply("❌ PDF file is empty or corrupted. Please send a valid PDF file.");
+                    await msg.reply("❌ PDF file is empty or corrupted. Please send a valid PDF file.").catch(() => {});
                     return;
                 }
 
                 console.log(`📄 Processing PDF: ${(pdfBuffer.length / 1024).toFixed(2)}KB, Topic: "${topic}", Timer: ${timer}s, Qty: ${qty}`);
 
                 try {
-                    await msg.reply(`🔍 Reading PDF and searching for "${topic}" questions...`);
+                    await msg.reply(`🔍 Reading PDF and searching for "${topic}" questions...`).catch(() => {});
 
                     const questions = await quizEngine.generateQuizFromPdfBuffer({
                         pdfBuffer,
@@ -1413,25 +1431,30 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                     });
 
                     if (questions.length === 0) {
-                        await msg.reply(`❌ No questions found for topic "${topic}" in the PDF.\n\n💡 Try:\n• Different topic name\n• Check if PDF contains "${topic}" content\n• Use "PDF Content" for general quiz`);
+                        await msg.reply(`❌ No questions found for topic "${topic}" in the PDF.\n\n💡 Try:\n• Different topic name\n• Check if PDF contains "${topic}" content\n• Use "PDF Content" for general quiz`).catch(() => {});
                         return;
                     }
 
-                    await msg.reply(`✅ Generated ${questions.length} questions on "${topic}"\n⏱️ Timer: ${timer}s per question\n\n🎯 Starting quiz now!`);
-                    quizEngine.startQuiz(chat, chat.id._serialized, questions, topic, timer);
+                    await msg.reply(`✅ Generated ${questions.length} questions on "${topic}"\n⏱️ Timer: ${timer}s per question\n\n🎯 Starting quiz now!`).catch(() => {});
+                    try {
+                        quizEngine.startQuiz(chat, chat.id._serialized, questions, topic, timer);
+                    } catch (quizErr) {
+                        console.error("⚠️ PDF quiz start error:", quizErr.message?.substring(0, 80));
+                        await msg.reply("⚠️ Quiz starting... please wait.").catch(() => {});
+                    }
                 } catch (e) {
                     console.error("PDF Quiz Generation Error:", e);
                     const errorMsg = e.message || 'Unknown error';
 
                     // Provide specific error messages
                     if (errorMsg.includes("empty") || errorMsg.includes("invalid")) {
-                        await msg.reply(`❌ PDF Error: ${errorMsg}\n\nPlease send a valid PDF file.`);
+                        await msg.reply(`❌ PDF Error: ${errorMsg}\n\nPlease send a valid PDF file.`).catch(() => {});
                     } else if (errorMsg.includes("quota") || errorMsg.includes("429")) {
-                        await msg.reply(`⚠️ API quota exceeded. Please wait a few minutes and try again.`);
+                        await msg.reply(`⚠️ API quota exceeded. Please wait a few minutes and try again.`).catch(() => {});
                     } else if (errorMsg.includes("No questions")) {
-                        await msg.reply(`❌ ${errorMsg}\n\n💡 Suggestions:\n• Try a different topic\n• Check if PDF contains the topic\n• Use general "PDF Content" topic`);
+                        await msg.reply(`❌ ${errorMsg}\n\n💡 Suggestions:\n• Try a different topic\n• Check if PDF contains the topic\n• Use general "PDF Content" topic`).catch(() => {});
                     } else {
-                        await msg.reply(`❌ Error: ${errorMsg}\n\nPlease check:\n• PDF is valid and readable\n• Topic exists in PDF\n• Try again in a moment`);
+                        await msg.reply(`❌ Error: ${errorMsg}\n\nPlease check:\n• PDF is valid and readable\n• Topic exists in PDF\n• Try again in a moment`).catch(() => {});
                     }
                 }
                 return;
@@ -1531,15 +1554,20 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
 
         if (isExplicitQuizRequest && !msg.hasMedia && !prompt.toLowerCase().includes("create") && !prompt.toLowerCase().includes("manual") && !prompt.toLowerCase().includes("pdf")) {
             if (quizEngine.isQuizActive(chat.id._serialized)) {
-                await msg.reply("⚠️ Quiz already active. Type 'stop quiz' to end it first.");
+                await msg.reply("⚠️ Quiz already active. Type 'stop quiz' to end it first.").catch(() => {});
                 return;
             }
-            await msg.reply("🎲 Starting General Quiz...");
+            await msg.reply("🎲 Starting General Quiz...").catch(() => {});
             const questions = [
                 { question: "What is the capital of India?", options: ["Mumbai", "Delhi", "Chennai", "Kolkata"], correct_index: 1, answer_explanation: "New Delhi is the capital." },
                 { question: "2 + 2 = ?", options: ["3", "4", "5", "6"], correct_index: 1, answer_explanation: "Basic arithmetic." }
             ];
-            quizEngine.startQuiz(chat, chat.id._serialized, questions, "General", 30);
+            try {
+                quizEngine.startQuiz(chat, chat.id._serialized, questions, "General", 30);
+            } catch (quizErr) {
+                console.error("⚠️ General quiz start error:", quizErr.message?.substring(0, 80));
+                await msg.reply("⚠️ Quiz starting... please wait.").catch(() => {});
+            }
             return;
         }
 
