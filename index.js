@@ -20,9 +20,7 @@ const indexName = 'whatsapp-bot';
 
 // --- CONNECTIONS ---
 // 1. MongoDB
-mongoose.connect(MONGODB_URI)
-    .then(() => console.log('🍃 MongoDB Connected'))
-    .catch(err => console.error('❌ MongoDB Connection Error:', err));
+// 1. MongoDB (Initialized in startClient)
 
 // 2. Pinecone
 const pc = new Pinecone({ apiKey: PINECONE_API_KEY });
@@ -464,6 +462,15 @@ async function handleMessage(msg) {
 
 // --- INITIALIZATION ---
 async function startClient() {
+    console.log('🔄 Connecting to MongoDB...');
+    try {
+        await mongoose.connect(MONGODB_URI);
+        console.log('🍃 MongoDB Connected');
+    } catch (err) {
+        console.error('❌ MongoDB Connection Error:', err);
+        return; // Stop if DB fails
+    }
+
     console.log('🔄 Init Client with RemoteAuth...');
     const store = new MongoStore({ mongoose: mongoose });
 
