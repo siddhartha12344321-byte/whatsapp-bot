@@ -211,283 +211,285 @@ async function queryPinecone(queryText) {
             return queryResponse.matches.filter(m => m.score > 0.5).map(m => m.metadata.text).join("\n\n");
         }
     } catch (e) { console.error("Pinecone Query Error:", e); }
-    async function generateQuizFromPdfBuffer({ pdfBuffer, topic = 'General', qty = 10, difficulty = 'medium' }) {
-        if (!pdfBuffer || pdfBuffer.length === 0) throw new Error("PDF Buffer empty");
-        const finalPrompt = `GENERATE QUIZ JSON. Topic: ${topic}. Difficulty: ${difficulty}. Qty: ${qty}. Source is the attached PDF. Extract questions from it. Output STRICT JSON: { "type": "quiz_batch", "topic": "${topic}", "quizzes": [ { "question": "...", "options":["A","B","C","D"], "correct_index": 0, "answer_explanation": "..." } ] }`;
+    return null;
+}
+async function generateQuizFromPdfBuffer({ pdfBuffer, topic = 'General', qty = 10, difficulty = 'medium' }) {
+    if (!pdfBuffer || pdfBuffer.length === 0) throw new Error("PDF Buffer empty");
+    const finalPrompt = `GENERATE QUIZ JSON. Topic: ${topic}. Difficulty: ${difficulty}. Qty: ${qty}. Source is the attached PDF. Extract questions from it. Output STRICT JSON: { "type": "quiz_batch", "topic": "${topic}", "quizzes": [ { "question": "...", "options":["A","B","C","D"], "correct_index": 0, "answer_explanation": "..." } ] }`;
 
-        const contentParts = [{ text: finalPrompt }, { inlineData: { data: pdfBuffer.toString('base64'), mimeType: 'application/pdf' } }];
-        let result;
-        try {
-            await callWithFallback(async (modelName) => {
-                if (!genAI) rotateKey();
-                const model = genAI.getGenerativeModel({ model: modelName });
-                result = await model.generateContent(contentParts);
-            });
-        } catch (e) { throw new Error("AI Overloaded (429) during Quiz Gen."); }
-
-        const jsonMatch = result.response.text().match(/\{[\s\S]*\}/);
-        if (!jsonMatch) throw new Error("No JSON found");
-        const data = JSON.parse(jsonMatch[0]);
-        let questions = data.quizzes || data.questions;
-        return questions.map(q => {
-            let options = q.options || ["True", "False"];
-            let cIndex = -1;
-            if (typeof q.correctAnswer === 'number') cIndex = q.correctAnswer;
-            if (cIndex === -1 && typeof q.correctAnswer === 'string') cIndex = options.findIndex(opt => opt.trim() === q.correctAnswer.trim());
-            if (cIndex === -1 && typeof q.correctAnswer === 'string' && q.correctAnswer.length === 1) cIndex = q.correctAnswer.toUpperCase().charCodeAt(0) - 65;
-            if (cIndex === -1 && typeof q.correctAnswer === 'string') cIndex = options.findIndex(opt => opt.toLowerCase().includes(q.correctAnswer.toLowerCase()));
-            if (cIndex < 0 || cIndex >= options.length) cIndex = 0;
-            return { question: q.questionText || q.question, options: options, correct_index: cIndex, answer_explanation: q.explanation || q.answer_explanation };
-        }).slice(0, qty);
-    }
-
-    // --- CORE HANDLERS ---
-    async function handleVote(vote) {
-        try {
-            const msgId = vote.parentMessage.id.id;
-            if (!activePolls.has(msgId)) return;
-            const { correctIndex, chatId, questionIndex, originalOptions } = activePolls.get(msgId); // Deep Memory
-            if (!quizSessions.has(chatId)) return;
-            const session = quizSessions.get(chatId);
-            if (questionIndex !== session.index) return;
-
-            const uniqueVoteKey = `${session.index}_${vote.voter}`;
-            if (session.creditedVotes.has(uniqueVoteKey)) return;
-            session.creditedVotes.add(uniqueVoteKey);
-            if (!session.scores.has(vote.voter)) session.scores.set(vote.voter, 0);
-
-            try {
-                // Options Check
-                const options = originalOptions || session.questions[session.index].options;
-                const normalize = (str) => (str ? String(str).trim().toLowerCase() : "");
-                const correctText = normalize(options[correctIndex]);
-
-                const isCorrect = vote.selectedOptions.some(opt => {
-                    const voteText = normalize(opt.name);
-                    return voteText === correctText || (voteText.length > 2 && correctText.includes(voteText)) || (correctText.length > 2 && voteText.includes(correctText));
-                });
-
-                console.log(`🗳️ Vote: ${vote.voter} | Expect: ${correctText} | Correct: ${isCorrect}`);
-                if (isCorrect) session.scores.set(vote.voter, session.scores.get(vote.voter) + 1);
-            } catch (e) { console.error("Vote Logic Error:", e); }
-        } catch (e) { console.error("Fatal Vote Error:", e); }
-    }
-
-    async function sendMockTestSummaryWithAnswers(chat, chatId) {
-        const session = quizSessions.get(chatId);
-        if (!session) return;
-        let template = `📘 *DETAILED SOLUTIONS* 📘\n*Topic:* ${session.topic}\n──────────────────\n\n`;
-        session.questions.forEach((q, idx) => {
-            template += `*Q${idx + 1}.* ${q.question}\n✅ ${q.options[q.correct_index]}\n💡 ${q.answer_explanation || ""}\n──────────────────\n\n`;
+    const contentParts = [{ text: finalPrompt }, { inlineData: { data: pdfBuffer.toString('base64'), mimeType: 'application/pdf' } }];
+    let result;
+    try {
+        await callWithFallback(async (modelName) => {
+            if (!genAI) rotateKey();
+            const model = genAI.getGenerativeModel({ model: modelName });
+            result = await model.generateContent(contentParts);
         });
-        if (template.length > 2000) {
-            const chunks = template.match(/.{1,2000}/g);
-            for (const chunk of chunks) await chat.sendMessage(chunk);
-        } else await chat.sendMessage(template);
+    } catch (e) { throw new Error("AI Overloaded (429) during Quiz Gen."); }
+
+    const jsonMatch = result.response.text().match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error("No JSON found");
+    const data = JSON.parse(jsonMatch[0]);
+    let questions = data.quizzes || data.questions;
+    return questions.map(q => {
+        let options = q.options || ["True", "False"];
+        let cIndex = -1;
+        if (typeof q.correctAnswer === 'number') cIndex = q.correctAnswer;
+        if (cIndex === -1 && typeof q.correctAnswer === 'string') cIndex = options.findIndex(opt => opt.trim() === q.correctAnswer.trim());
+        if (cIndex === -1 && typeof q.correctAnswer === 'string' && q.correctAnswer.length === 1) cIndex = q.correctAnswer.toUpperCase().charCodeAt(0) - 65;
+        if (cIndex === -1 && typeof q.correctAnswer === 'string') cIndex = options.findIndex(opt => opt.toLowerCase().includes(q.correctAnswer.toLowerCase()));
+        if (cIndex < 0 || cIndex >= options.length) cIndex = 0;
+        return { question: q.questionText || q.question, options: options, correct_index: cIndex, answer_explanation: q.explanation || q.answer_explanation };
+    }).slice(0, qty);
+}
+
+// --- CORE HANDLERS ---
+async function handleVote(vote) {
+    try {
+        const msgId = vote.parentMessage.id.id;
+        if (!activePolls.has(msgId)) return;
+        const { correctIndex, chatId, questionIndex, originalOptions } = activePolls.get(msgId); // Deep Memory
+        if (!quizSessions.has(chatId)) return;
+        const session = quizSessions.get(chatId);
+        if (questionIndex !== session.index) return;
+
+        const uniqueVoteKey = `${session.index}_${vote.voter}`;
+        if (session.creditedVotes.has(uniqueVoteKey)) return;
+        session.creditedVotes.add(uniqueVoteKey);
+        if (!session.scores.has(vote.voter)) session.scores.set(vote.voter, 0);
+
+        try {
+            // Options Check
+            const options = originalOptions || session.questions[session.index].options;
+            const normalize = (str) => (str ? String(str).trim().toLowerCase() : "");
+            const correctText = normalize(options[correctIndex]);
+
+            const isCorrect = vote.selectedOptions.some(opt => {
+                const voteText = normalize(opt.name);
+                return voteText === correctText || (voteText.length > 2 && correctText.includes(voteText)) || (correctText.length > 2 && voteText.includes(correctText));
+            });
+
+            console.log(`🗳️ Vote: ${vote.voter} | Expect: ${correctText} | Correct: ${isCorrect}`);
+            if (isCorrect) session.scores.set(vote.voter, session.scores.get(vote.voter) + 1);
+        } catch (e) { console.error("Vote Logic Error:", e); }
+    } catch (e) { console.error("Fatal Vote Error:", e); }
+}
+
+async function sendMockTestSummaryWithAnswers(chat, chatId) {
+    const session = quizSessions.get(chatId);
+    if (!session) return;
+    let template = `📘 *DETAILED SOLUTIONS* 📘\n*Topic:* ${session.topic}\n──────────────────\n\n`;
+    session.questions.forEach((q, idx) => {
+        template += `*Q${idx + 1}.* ${q.question}\n✅ ${q.options[q.correct_index]}\n💡 ${q.answer_explanation || ""}\n──────────────────\n\n`;
+    });
+    if (template.length > 2000) {
+        const chunks = template.match(/.{1,2000}/g);
+        for (const chunk of chunks) await chat.sendMessage(chunk);
+    } else await chat.sendMessage(template);
+}
+
+async function runQuizStep(chat, chatId) {
+    const session = quizSessions.get(chatId);
+    if (!session || !session.active) return;
+    if (session.index >= session.questions.length) {
+        let report = `🏆 *RANK LIST* 🏆\n*Subject:* ${session.topic}\n──────────────────\n`;
+        const sorted = [...session.scores.entries()].sort((a, b) => b[1] - a[1]);
+        if (sorted.length === 0) report += "No votes.";
+        else sorted.forEach(([id, sc], i) => {
+            report += `${i === 0 ? '🥇' : i === 1 ? '🥈' : '🥉'} @${id.split('@')[0]} : ${sc}/${session.questions.length}\n`;
+        });
+        report += `──────────────────`;
+        await chat.sendMessage(report, { mentions: sorted.map(s => s[0]) });
+        await sendMockTestSummaryWithAnswers(chat, chatId);
+        quizSessions.delete(chatId);
+        return;
     }
 
-    async function runQuizStep(chat, chatId) {
-        const session = quizSessions.get(chatId);
-        if (!session || !session.active) return;
-        if (session.index >= session.questions.length) {
-            let report = `🏆 *RANK LIST* 🏆\n*Subject:* ${session.topic}\n──────────────────\n`;
-            const sorted = [...session.scores.entries()].sort((a, b) => b[1] - a[1]);
-            if (sorted.length === 0) report += "No votes.";
-            else sorted.forEach(([id, sc], i) => {
-                report += `${i === 0 ? '🥇' : i === 1 ? '🥈' : '🥉'} @${id.split('@')[0]} : ${sc}/${session.questions.length}\n`;
-            });
-            report += `──────────────────`;
-            await chat.sendMessage(report, { mentions: sorted.map(s => s[0]) });
-            await sendMockTestSummaryWithAnswers(chat, chatId);
-            quizSessions.delete(chatId);
+    const q = session.questions[session.index];
+    const poll = new Poll(`Q${session.index + 1}: ${q.question}`, q.options, { allowMultipleAnswers: false });
+    const sentMsg = await chat.sendMessage(poll);
+    activePolls.set(sentMsg.id.id, { correctIndex: q.correct_index, chatId, questionIndex: session.index, originalOptions: q.options });
+
+    setTimeout(() => {
+        if (!quizSessions.has(chatId)) return;
+        activePolls.delete(sentMsg.id.id);
+        session.index++;
+        setTimeout(() => runQuizStep(chat, chatId), 1000);
+    }, session.timer * 1000);
+}
+
+async function handleImageGeneration(msg, prompt) {
+    await msg.reply("🎨 Drawing...");
+    try {
+        const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?nologo=true`;
+        const media = await MessageMedia.fromUrl(url, { unsafeMime: true });
+        await msg.reply(media);
+    } catch (e) { console.error(e); await msg.reply("❌ Image Gen Failed"); }
+}
+
+async function handleWebSearch(msg, query) {
+    if (!process.env.TAVILY_API_KEY) return "No API Key";
+    await msg.reply("🕵️‍♂️ Searching...");
+    try {
+        const response = await fetch("https://api.tavily.com/search", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ api_key: process.env.TAVILY_API_KEY, query, search_depth: "basic", include_answer: true, max_results: 3 })
+        });
+        const data = await response.json();
+        let txt = data.answer ? `📝 ${data.answer}\n` : "";
+        if (data.results) data.results.forEach(r => txt += `- [${r.title}](${r.url})\n`);
+        await msg.reply(txt || "No results");
+        return txt;
+    } catch (e) { return null; }
+}
+
+async function handleMessage(msg) {
+    try {
+        console.log(`📩 RECEIVED: ${msg.body} from ${msg.from}`);
+        const chat = await msg.getChat();
+
+        // STRICT GATEKEEPER
+        if (chat.isGroup) {
+            const isTagged = msg.mentionedIds.includes(client.info.wid._serialized) || msg.body.includes("@");
+            const hasSession = quizSessions.has(chat.id._serialized);
+            if (!isTagged) {
+                if (!hasSession) { console.log("⛔ Gatekeeper: Ignore Group msg (No Tag/Session)"); return; }
+                if (!msg.body.trim().match(/^[a-dA-D1-4]$/) && !msg.body.toLowerCase().includes("stop")) {
+                    console.log("⛔ Gatekeeper: Ignore Group msg (Invalid Input)"); return;
+                }
+            }
+        }
+        console.log("✅ Gatekeeper Passed");
+
+        let prompt = sanitizeHtml(msg.body.replace(/@\S+/g, "").trim());
+        const user = await updateUserProfile(msg.from, msg._data.notifyName);
+
+        if (prompt.toLowerCase().startsWith("draw ")) return await handleImageGeneration(msg, prompt.replace("draw ", ""));
+        if (prompt.toLowerCase().startsWith("search ")) return await handleWebSearch(msg, prompt.replace("search ", ""));
+
+        if (msg.hasMedia && prompt.toLowerCase().includes("learn")) {
+            await msg.reply("🧠 Memorizing...");
+            try {
+                const media = await msg.downloadMedia();
+                let text = "";
+                if (media.mimetype === 'application/pdf') {
+                    const data = await pdfParse(Buffer.from(media.data, 'base64'));
+                    text = data.text;
+                } else if (media.mimetype === 'text/plain') text = Buffer.from(media.data, 'base64').toString('utf-8');
+
+                if (text) {
+                    await upsertToPinecone(text, "UserUpload_" + Date.now());
+                    await msg.reply("✅ Memorized.");
+                } else await msg.reply("❌ Invalid File.");
+            } catch (e) { await msg.reply("❌ Error."); }
             return;
         }
 
-        const q = session.questions[session.index];
-        const poll = new Poll(`Q${session.index + 1}: ${q.question}`, q.options, { allowMultipleAnswers: false });
-        const sentMsg = await chat.sendMessage(poll);
-        activePolls.set(sentMsg.id.id, { correctIndex: q.correct_index, chatId, questionIndex: session.index, originalOptions: q.options });
-
-        setTimeout(() => {
-            if (!quizSessions.has(chatId)) return;
-            activePolls.delete(sentMsg.id.id);
-            session.index++;
-            setTimeout(() => runQuizStep(chat, chatId), 1000);
-        }, session.timer * 1000);
-    }
-
-    async function handleImageGeneration(msg, prompt) {
-        await msg.reply("🎨 Drawing...");
-        try {
-            const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?nologo=true`;
-            const media = await MessageMedia.fromUrl(url, { unsafeMime: true });
-            await msg.reply(media);
-        } catch (e) { console.error(e); await msg.reply("❌ Image Gen Failed"); }
-    }
-
-    async function handleWebSearch(msg, query) {
-        if (!process.env.TAVILY_API_KEY) return "No API Key";
-        await msg.reply("🕵️‍♂️ Searching...");
-        try {
-            const response = await fetch("https://api.tavily.com/search", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ api_key: process.env.TAVILY_API_KEY, query, search_depth: "basic", include_answer: true, max_results: 3 })
-            });
-            const data = await response.json();
-            let txt = data.answer ? `📝 ${data.answer}\n` : "";
-            if (data.results) data.results.forEach(r => txt += `- [${r.title}](${r.url})\n`);
-            await msg.reply(txt || "No results");
-            return txt;
-        } catch (e) { return null; }
-    }
-
-    async function handleMessage(msg) {
-        try {
-            console.log(`📩 RECEIVED: ${msg.body} from ${msg.from}`);
-            const chat = await msg.getChat();
-
-            // STRICT GATEKEEPER
-            if (chat.isGroup) {
-                const isTagged = msg.mentionedIds.includes(client.info.wid._serialized) || msg.body.includes("@");
-                const hasSession = quizSessions.has(chat.id._serialized);
-                if (!isTagged) {
-                    if (!hasSession) { console.log("⛔ Gatekeeper: Ignore Group msg (No Tag/Session)"); return; }
-                    if (!msg.body.trim().match(/^[a-dA-D1-4]$/) && !msg.body.toLowerCase().includes("stop")) {
-                        console.log("⛔ Gatekeeper: Ignore Group msg (Invalid Input)"); return;
-                    }
-                }
-            }
-            console.log("✅ Gatekeeper Passed");
-
-            let prompt = sanitizeHtml(msg.body.replace(/@\S+/g, "").trim());
-            const user = await updateUserProfile(msg.from, msg._data.notifyName);
-
-            if (prompt.toLowerCase().startsWith("draw ")) return await handleImageGeneration(msg, prompt.replace("draw ", ""));
-            if (prompt.toLowerCase().startsWith("search ")) return await handleWebSearch(msg, prompt.replace("search ", ""));
-
-            if (msg.hasMedia && prompt.toLowerCase().includes("learn")) {
-                await msg.reply("🧠 Memorizing...");
-                try {
-                    const media = await msg.downloadMedia();
-                    let text = "";
-                    if (media.mimetype === 'application/pdf') {
-                        const data = await pdfParse(Buffer.from(media.data, 'base64'));
-                        text = data.text;
-                    } else if (media.mimetype === 'text/plain') text = Buffer.from(media.data, 'base64').toString('utf-8');
-
-                    if (text) {
-                        await upsertToPinecone(text, "UserUpload_" + Date.now());
-                        await msg.reply("✅ Memorized.");
-                    } else await msg.reply("❌ Invalid File.");
-                } catch (e) { await msg.reply("❌ Error."); }
-                return;
-            }
-
-            if (msg.hasMedia && prompt.toLowerCase().includes("quiz")) {
-                const media = await msg.downloadMedia();
-                if (media.mimetype === 'application/pdf') {
-                    await msg.reply("📄 Reasoning from PDF...");
-                    const pdfBuffer = Buffer.from(media.data, 'base64');
-                    let timer = 30;
-                    const timeMatch = prompt.match(/every (\d+)\s*(s|m)/);
-                    if (timeMatch) timer = parseInt(timeMatch[1]) * (timeMatch[2] == 'm' ? 60 : 1);
-                    const questions = await generateQuizFromPdfBuffer({ pdfBuffer, topic: "PDF Content", qty: 10 });
-                    quizSessions.set(chat.id._serialized, { questions, index: 0, timer, active: true, scores: new Map(), creditedVotes: new Set(), topic: "PDF" });
-                    runQuizStep(chat, chat.id._serialized);
-                    return;
-                }
-            }
-
-            if (prompt.toLowerCase().includes("daily polls") || (prompt.toLowerCase().includes("quiz") && !msg.hasMedia)) {
-                if (quizSessions.has(chat.id._serialized)) { await msg.reply("Quiz already active."); return; }
-                await msg.reply("🎲 Starting General Quiz...");
-                const questions = [
-                    { question: "What is the capital of India?", options: ["Mumbai", "Delhi", "Chennai", "Kolkata"], correct_index: 1, answer_explanation: "New Delhi is the capital." },
-                    { question: "2 + 2 = ?", options: ["3", "4", "5", "6"], correct_index: 1, answer_explanation: "Math." }
-                ];
-                quizSessions.set(chat.id._serialized, { questions, index: 0, timer: 30, active: true, scores: new Map(), creditedVotes: new Set(), topic: "General" });
+        if (msg.hasMedia && prompt.toLowerCase().includes("quiz")) {
+            const media = await msg.downloadMedia();
+            if (media.mimetype === 'application/pdf') {
+                await msg.reply("📄 Reasoning from PDF...");
+                const pdfBuffer = Buffer.from(media.data, 'base64');
+                let timer = 30;
+                const timeMatch = prompt.match(/every (\d+)\s*(s|m)/);
+                if (timeMatch) timer = parseInt(timeMatch[1]) * (timeMatch[2] == 'm' ? 60 : 1);
+                const questions = await generateQuizFromPdfBuffer({ pdfBuffer, topic: "PDF Content", qty: 10 });
+                quizSessions.set(chat.id._serialized, { questions, index: 0, timer, active: true, scores: new Map(), creditedVotes: new Set(), topic: "PDF" });
                 runQuizStep(chat, chat.id._serialized);
                 return;
             }
+        }
 
-            const isVoice = msg.type === 'ptt' || msg.type === 'audio' || prompt.includes("speak");
+        if (prompt.toLowerCase().includes("daily polls") || (prompt.toLowerCase().includes("quiz") && !msg.hasMedia)) {
+            if (quizSessions.has(chat.id._serialized)) { await msg.reply("Quiz already active."); return; }
+            await msg.reply("🎲 Starting General Quiz...");
+            const questions = [
+                { question: "What is the capital of India?", options: ["Mumbai", "Delhi", "Chennai", "Kolkata"], correct_index: 1, answer_explanation: "New Delhi is the capital." },
+                { question: "2 + 2 = ?", options: ["3", "4", "5", "6"], correct_index: 1, answer_explanation: "Math." }
+            ];
+            quizSessions.set(chat.id._serialized, { questions, index: 0, timer: 30, active: true, scores: new Map(), creditedVotes: new Set(), topic: "General" });
+            runQuizStep(chat, chat.id._serialized);
+            return;
+        }
 
-            console.log("🔍 Starting RAG retrieval...");
-            const context = await queryPinecone(prompt);
-            console.log("📚 RAG Context retrieved. Starting Hydra...");
+        const isVoice = msg.type === 'ptt' || msg.type === 'audio' || prompt.includes("speak");
 
-            let responseText = "";
-            try {
-                await callWithFallback(async (modelName) => {
-                    if (!genAI) rotateKey();
-                    console.log(`🤖 Hydra Trying: ${modelName}`);
-                    const model = genAI.getGenerativeModel({ model: modelName });
-                    const chatSession = model.startChat({
-                        history: [
-                            { role: "user", parts: [{ text: "SYSTEM: Strict exam mentor. Concise. Logic > Fluff." }] },
-                            ...(chatHistory.get(chat.id._serialized) || [])
-                        ]
-                    });
-                    const finalPrompt = context ? `Context: ${context}\nUser: ${prompt}` : prompt;
-                    const result = await chatSession.sendMessage(finalPrompt);
-                    responseText = result.response.text();
-                    console.log(`✅ Hydra Success with: ${modelName}`);
+        console.log("🔍 Starting RAG retrieval...");
+        const context = await queryPinecone(prompt);
+        console.log("📚 RAG Context retrieved. Starting Hydra...");
+
+        let responseText = "";
+        try {
+            await callWithFallback(async (modelName) => {
+                if (!genAI) rotateKey();
+                console.log(`🤖 Hydra Trying: ${modelName}`);
+                const model = genAI.getGenerativeModel({ model: modelName });
+                const chatSession = model.startChat({
+                    history: [
+                        { role: "user", parts: [{ text: "SYSTEM: Strict exam mentor. Concise. Logic > Fluff." }] },
+                        ...(chatHistory.get(chat.id._serialized) || [])
+                    ]
                 });
-            } catch (err) {
-                console.error("🔥 All Models Failed:", err);
-                await msg.reply("⚠️ AI System Busy. Please wait 1m.");
-                return;
-            }
-
-            console.log("📤 Sending Reply...");
-            updateHistory(chat.id._serialized, "user", prompt);
-            updateHistory(chat.id._serialized, "model", responseText);
-
-            if (isVoice) {
-                try {
-                    const url = googleTTS.getAudioUrl(responseText, { lang: 'en', slow: false });
-                    const media = await MessageMedia.fromUrl(url, { unsafeMime: true });
-                    await client.sendMessage(msg.from, media, { sendAudioAsVoice: true });
-                } catch (e) { await msg.reply(responseText); }
-            } else {
-                await msg.reply(responseText);
-            }
-            console.log("✅ Reply Sent.");
-
-        } catch (e) {
-            console.error("🔥 FATAL MSG ERROR:", e);
+                const finalPrompt = context ? `Context: ${context}\nUser: ${prompt}` : prompt;
+                const result = await chatSession.sendMessage(finalPrompt);
+                responseText = result.response.text();
+                console.log(`✅ Hydra Success with: ${modelName}`);
+            });
+        } catch (err) {
+            console.error("🔥 All Models Failed:", err);
+            await msg.reply("⚠️ AI System Busy. Please wait 1m.");
+            return;
         }
-    }
 
-    // --- INITIALIZATION ---
-    async function startClient() {
-        console.log('🔄 Init Client with RemoteAuth...');
-        const store = new MongoStore({ mongoose: mongoose });
+        console.log("📤 Sending Reply...");
+        updateHistory(chat.id._serialized, "user", prompt);
+        updateHistory(chat.id._serialized, "model", responseText);
 
-        let puppetConfig = {
-            headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
-        };
-        if (process.platform === 'win32') {
-            puppetConfig.executablePath = `${process.env.LOCALAPPDATA}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`;
-            puppetConfig.headless = false;
+        if (isVoice) {
+            try {
+                const url = googleTTS.getAudioUrl(responseText, { lang: 'en', slow: false });
+                const media = await MessageMedia.fromUrl(url, { unsafeMime: true });
+                await client.sendMessage(msg.from, media, { sendAudioAsVoice: true });
+            } catch (e) { await msg.reply(responseText); }
         } else {
-            puppetConfig.executablePath = await chromium.executablePath();
+            await msg.reply(responseText);
         }
+        console.log("✅ Reply Sent.");
 
-        client = new Client({
-            authStrategy: new RemoteAuth({ store: store, backupSyncIntervalMs: 60000 }),
-            puppeteer: puppetConfig
-        });
+    } catch (e) {
+        console.error("🔥 FATAL MSG ERROR:", e);
+    }
+}
 
-        client.on('qr', (qr) => { qrCodeData = qr; qrcode.generate(qr, { small: true }); console.log("⚡ SCAN QR"); });
-        client.on('ready', () => { console.log("✅ Ready"); qrCodeData = ""; });
-        client.on('vote_update', handleVote);
-        client.on('message', handleMessage);
-        client.on('remote_session_saved', () => console.log('💾 Saved Session'));
+// --- INITIALIZATION ---
+async function startClient() {
+    console.log('🔄 Init Client with RemoteAuth...');
+    const store = new MongoStore({ mongoose: mongoose });
 
-        await client.initialize();
+    let puppetConfig = {
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+    };
+    if (process.platform === 'win32') {
+        puppetConfig.executablePath = `${process.env.LOCALAPPDATA}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`;
+        puppetConfig.headless = false;
+    } else {
+        puppetConfig.executablePath = await chromium.executablePath();
     }
 
-    startClient();
+    client = new Client({
+        authStrategy: new RemoteAuth({ store: store, backupSyncIntervalMs: 60000 }),
+        puppeteer: puppetConfig
+    });
+
+    client.on('qr', (qr) => { qrCodeData = qr; qrcode.generate(qr, { small: true }); console.log("⚡ SCAN QR"); });
+    client.on('ready', () => { console.log("✅ Ready"); qrCodeData = ""; });
+    client.on('vote_update', handleVote);
+    client.on('message', handleMessage);
+    client.on('remote_session_saved', () => console.log('💾 Saved Session'));
+
+    await client.initialize();
+}
+
+startClient();
