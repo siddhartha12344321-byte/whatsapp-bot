@@ -2,21 +2,6 @@ const { Client, LocalAuth, RemoteAuth, Poll, MessageMedia } = require('whatsapp-
 const { MongoStore } = require('wwebjs-mongo');
 const qrcode = require('qrcode-terminal');
 const QRCodeImage = require('qrcode');
-const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generative-ai");
-const express = require('express');
-const fs = require('fs');
-const sanitizeHtml = require('sanitize-html');
-const chromium = require('@sparticuz/chromium');
-const puppeteer = require('puppeteer-core');
-const pdfParse = require('pdf-parse');
-const mongoose = require('mongoose');
-const { Pinecone } = require('@pinecone-database/pinecone');
-const googleTTS = require('google-tts-api');
-const QuizEngine = require('./quiz-engine');
-
-// --- CONFIGURATION ---
-const MONGODB_URI = process.env.MONGODB_URI || "mongodb+srv://amurag12344321_db_user:78mbO8WPw69AeTpt@siddharthawhatsappbot.wfbdgjf.mongodb.net/?appName=SiddharthaWhatsappBot";
-const PINECONE_API_KEY = process.env.PINECONE_API_KEY || 'pcsk_4YGs7G_FB4bw1RbEejhHeiwEeL8wrU2vS1vQfFS2TcdhxJjsrehCHMyeFtHw4cHJkWPZvc';
 const indexName = 'whatsapp-bot';
 
 // --- CONNECTIONS ---
@@ -27,11 +12,9 @@ const indexName = 'whatsapp-bot';
 const pc = new Pinecone({ apiKey: PINECONE_API_KEY });
 
 // 3. Gemini
-const rawKeys = [process.env.GEMINI_API_KEY_2, process.env.GEMINI_API_KEY].filter(k => k);
-const quizEngine = new QuizEngine(rawKeys);
-
-let currentKeyIndex = 0;
-let genAI = rawKeys.length ? new GoogleGenerativeAI(rawKeys[currentKeyIndex]) : null;
+// 3. Groq (Replaces Gemini)
+const quizEngine = new QuizEngine(process.env.GROQ_API_KEY);
+let genAI = null; // Deprecated
 
 function rotateKey() {
     currentKeyIndex = (currentKeyIndex + 1) % rawKeys.length;
@@ -1004,21 +987,12 @@ Keep it SHORT, CLEAR, EASY TO READ. No long paragraphs!`
             let explanation = "";
             try {
                 const context = await queryPinecone(fullPrompt);
-                await callWithFallback(async (modelName) => {
-                    if (!genAI) rotateKey();
-                    const model = genAI.getGenerativeModel({ model: modelName });
-                    // Load chat history from database if not in memory
-                    let sessionHistory = chatHistory.get(chat.id._serialized);
-                    if (!sessionHistory || sessionHistory.length === 0) {
-                        sessionHistory = await loadChatHistory(chat.id._serialized);
-                    }
 
-                    const chatSession = model.startChat({
-                        history: [
-                            {
-                                role: "user",
-                                parts: [{
-                                    text: `You are an exam tutor. CRITICAL RULES:
+                try {
+                    const chatSession = await quizEngine.chat([
+                        {
+                            role: "system",
+                            content: `You are an exam tutor. CRITICAL RULES:
 1. MAX 100 WORDS per response - BE CONCISE!
 2. Use simple, clear language
 3. Structure: Answer → Brief explanation → 1 key point
@@ -1032,15 +1006,16 @@ Format:
 🔑 Key: [1 important concept]
 
 Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!`
-                                }],
-                            },
-                            ...(sessionHistory || [])
-                        ]
-                    });
-                    const finalPrompt = context ? `Relevant context from study materials:\n${context}\n\n${fullPrompt}` : fullPrompt;
-                    const result = await chatSession.sendMessage(finalPrompt);
-                    explanation = result.response.text();
-                });
+                        },
+                        {
+                            role: "user",
+                            content: context ? `Relevant context from study materials:\n${context}\n\n${fullPrompt}` : fullPrompt
+                        },
+                        ...(chatHistory.get(chat.id._serialized) || [])
+                    ]);
+
+                    explanation = chatSession.response.text();
+                } catch (e) { console.error("Groq Explainer Error:", e); throw e; }
 
                 // Format the response as exam tutor explanation
                 const formattedResponse = formatExamTutorResponse(pollContent, explanation, isPollReply);
@@ -1323,28 +1298,20 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
         );
 
         try {
-            await callWithFallback(async (modelName) => {
-                if (!genAI) rotateKey();
-                console.log(`🤖 Hydra Trying: ${modelName}`);
-                const model = genAI.getGenerativeModel({ model: modelName });
-                // Load chat history from database if not in memory
-                let sessionHistory = chatHistory.get(chat.id._serialized);
-                if (!sessionHistory || sessionHistory.length === 0) {
-                    sessionHistory = await loadChatHistory(chat.id._serialized);
-                }
+            console.log(`🤖 Hydra Trying: Groq (Llama 3)`);
 
-                // Get user memories for context
-                const userMemories = await getUserMemories(chat.id._serialized, user.userId || chat.id._serialized.split('@')[0]);
-                const memoryContext = userMemories ? `\n\nRemember about this user: ${userMemories}` : '';
+            // Get user memories for context
+            const userMemories = await getUserMemories(chat.id._serialized, user.userId || chat.id._serialized.split('@')[0]);
+            const memoryContext = userMemories ? `\n\nRemember about this user: ${userMemories}` : '';
 
+            // Enhance prompt based on question type
+            let enhancedPrompt = prompt;
+            if (isMCQ) {
+                enhancedPrompt = `As an exam tutor, explain this MCQ/poll in MAX 100 words:\n${prompt}`;
+            }
 
-                const chatSession = model.startChat({
-                    history: [
-                        {
-                            role: "user",
-                            parts: [{
-                                text: isMCQ
-                                    ? `You are an exam tutor for UPSC/SSC/government exams. For MCQs/polls, provide structured explanation in MAX 100 words:
+            const systemPrompt = isMCQ
+                ? `You are an exam tutor for UPSC/SSC/government exams. For MCQs/polls, provide structured explanation in MAX 100 words:
 
 Format for MCQs/Polls:
 ✅ Answer: [Option + 1 sentence]
@@ -1352,7 +1319,7 @@ Format for MCQs/Polls:
 🔑 Key Point: [1 concept]
 
 Be concise, clear, and exam-focused.${memoryContext}`
-                                    : `You are a helpful AI assistant. Be natural, conversational, and dynamic. 
+                : `You are a helpful AI assistant. Be natural, conversational, and dynamic. 
 
 Guidelines:
 - Answer naturally based on the question type
@@ -1362,26 +1329,16 @@ Guidelines:
 - Be engaging and human-like
 - Remember past conversations${memoryContext}
 
-Don't force a rigid format - adapt to the question type naturally.`
-                            }],
-                        },
-                        ...(sessionHistory || [])
-                    ]
-                });
+Don't force a rigid format - adapt to the question type naturally.`;
 
-                // Enhance prompt based on question type
-                let enhancedPrompt = prompt;
+            const chatSession = await quizEngine.chat([
+                { role: "system", content: systemPrompt },
+                { role: "user", content: context ? `Relevant context:\n${context}\n\nUser's question: ${enhancedPrompt}` : enhancedPrompt },
+                ...(chatHistory.get(chat.id._serialized) || [])
+            ]);
 
-                // Only format MCQs/polls specially
-                if (isMCQ) {
-                    enhancedPrompt = `As an exam tutor, explain this MCQ/poll in MAX 100 words:\n${prompt}`;
-                }
-
-                const finalPrompt = context ? `Relevant context:\n${context}\n\nUser's question: ${enhancedPrompt}` : enhancedPrompt;
-                const result = await chatSession.sendMessage(finalPrompt);
-                responseText = result.response.text();
-                console.log(`✅ Hydra Success with: ${modelName}`);
-            });
+            responseText = chatSession.response.text();
+            console.log(`✅ Hydra Success with: Groq`);
         } catch (err) {
             console.error("🔥 All Models Failed:", err);
             const errorMsg = err.message || '';

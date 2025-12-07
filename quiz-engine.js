@@ -1,32 +1,60 @@
 const { Poll } = require('whatsapp-web.js');
-const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generative-ai");
 const pdfParse = require('pdf-parse');
 const util = require('util');
 const sleep = util.promisify(setTimeout);
 
+// --- GROQ CLIENT IMPLEMENTATION (Fetch Base) ---
+// We use fetch directly to avoid npm dependency issues
+class GroqClient {
+    constructor(apiKey) {
+        this.apiKey = apiKey;
+        this.baseUrl = "https://api.groq.com/openai/v1/chat/completions";
+    }
+
+    async chat(messages, model = "llama3-70b-8192", temperature = 0.7) {
+        if (!this.apiKey) throw new Error("Groq API Key is missing");
+
+        const response = await fetch(this.baseUrl, {
+            method: "POST",
+            headers: {
+                "Authorization": `Bearer ${this.apiKey}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                model: model,
+                messages: messages,
+                temperature: temperature,
+                response_format: { type: "json_object" } // Force JSON for stability
+            })
+        });
+
+        if (!response.ok) {
+            const errText = await response.text();
+            throw new Error(`Groq API Error (${response.status}): ${errText}`);
+        }
+
+        const data = await response.json();
+        return data.choices[0].message.content;
+    }
+}
+
 class QuizEngine {
-    constructor(apiKeys) {
-        this.apiKeys = apiKeys || [];
-        this.currentKeyIndex = 0;
-        this.genAI = this.apiKeys.length ? new GoogleGenerativeAI(this.apiKeys[this.currentKeyIndex]) : null;
+    constructor(apiKey) {
+        this.apiKey = apiKey;
+        this.groq = new GroqClient(this.apiKey);
 
         // State
         this.quizSessions = new Map();
         this.activePolls = new Map();
 
         // Models Configuration
+        // Note: Groq is fast, so we mainly use the best model.
+        // Fallbacks can be standard Llama 3 8b if 70b is busy.
         this.MODELS = [
-            "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash",
-            "gemini-flash-latest", "gemini-pro-latest", "gemini-2.0-flash-001"
+            "llama3-70b-8192",
+            "llama3-8b-8192",
+            "mixtral-8x7b-32768"
         ];
-    }
-
-    // --- AI HELPERS (Duplicated for Independence) ---
-    rotateKey() {
-        if (this.apiKeys.length <= 1) return;
-        this.currentKeyIndex = (this.currentKeyIndex + 1) % this.apiKeys.length;
-        this.genAI = new GoogleGenerativeAI(this.apiKeys[this.currentKeyIndex]);
-        console.log(`🔑 [QuizEngine] Rotated to API Key Index: ${this.currentKeyIndex}`);
     }
 
     async callWithFallback(fnGenerator) {
@@ -36,10 +64,9 @@ class QuizEngine {
                 return await fnGenerator(modelName);
             } catch (e) {
                 lastError = e;
-                if (e.message?.includes('404')) continue;
-                if (e.message?.includes('429') || e.message?.includes('quota')) {
-                    this.rotateKey();
-                    await sleep(2000); // Brief pause
+                console.warn(`⚠️ Model ${modelName} failed: ${e.message}. Retrying...`);
+                if (e.message?.includes('429')) {
+                    await sleep(2000); // Wait on rate limit
                     continue;
                 }
                 if (modelName === this.MODELS[this.MODELS.length - 1]) break;
@@ -59,31 +86,69 @@ class QuizEngine {
         }
     }
 
+    // --- GENERAL CHAT (New) ---
+    async chat(messages) {
+        return await this.callWithFallback(async (modelName) => {
+            // Adapt generic messages to Groq format if needed, but standard array works
+            // Remove response_format JSON enforcement for general chat if needed, 
+            // but here we might want text. 
+            // IMPORTANT: GroqClient above enforces JSON. We need a text version.
+            // We'll modify usage or GroqClient to be flexible.
+
+            // Quick Fix: Inline fetch for non-JSON chat or modify GroqClient.
+            // Let's modify GroqClient logic slightly in-place here or just duplicate simple fetch
+
+            const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+                method: "POST",
+                headers: {
+                    "Authorization": `Bearer ${this.apiKey}`,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    model: modelName,
+                    messages: messages,
+                    temperature: 0.7
+                    // No response_format for general chat to allow free text
+                })
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(JSON.stringify(data));
+            return { response: { text: () => data.choices[0].message.content } }; // Mock Gemini interface
+        });
+    }
+
     async generateQuizFromPdfBuffer({ pdfBuffer, topic = 'General', qty = 10, difficulty = 'medium' }) {
         if (!pdfBuffer || pdfBuffer.length === 0) throw new Error("PDF Buffer empty");
 
-        // Extract text for topic check (logic copied from index.js)
+        // Extract text (Groq cannot read PDF files directly)
         let pdfText = await this.extractPdfText(pdfBuffer);
+        // Truncate if too huge (Groq window is ~8k-32k tokens depending on model)
+        // 32k tokens is roughly 120k characters. safe limit 100k
+        if (pdfText.length > 100000) {
+            console.warn("PDF too large, truncating to 100k chars for Groq");
+            pdfText = pdfText.substring(0, 100000) + "...[truncated]";
+        }
 
         const topicFilter = topic && topic !== 'General' && topic !== 'PDF Content'
-            ? `🚨 CRITICAL INSTRUCTIONS: Read ENTIRE PDF. Extract ONLY questions about "${topic}". If none, return empty.`
-            : `Read the ENTIRE PDF. Extract questions from all topics.`;
+            ? `🚨 CRITICAL: Extract ONLY questions about "${topic}". If none, return empty JSON.`
+            : `Extract questions from all topics.`;
 
-        const finalPrompt = `You are a quiz generator. ${topicFilter}
-Generate exactly ${qty} multiple-choice questions from the PDF.
-Difficulty level: ${difficulty}
+        const systemPrompt = `You are a quiz generator. Output strictly JSON.`;
+        const userPrompt = `Context:
+${pdfText}
 
-REQUIREMENTS:
-- Each question must have exactly 4 options (A, B, C, D)
-- Provide clear, unambiguous correct answers
-- Include brief explanations for each answer
-- Output STRICT JSON format:
+Instructions:
+${topicFilter}
+Generate exactly ${qty} multiple-choice questions.
+Difficulty: ${difficulty}
+
+Format:
 {
   "type": "quiz_batch",
   "topic": "${topic}",
   "quizzes": [
     {
-      "question": "Question text",
+      "question": "Question",
       "options": ["A", "B", "C", "D"],
       "correct_index": 0,
       "answer_explanation": "Explanation"
@@ -91,26 +156,20 @@ REQUIREMENTS:
   ]
 }`;
 
-        // Validate Size
-        if (pdfBuffer.length > 20 * 1024 * 1024) throw new Error("PDF too large (>20MB)");
-
-        const contentParts = [
-            { text: finalPrompt },
-            { inlineData: { data: pdfBuffer.toString('base64'), mimeType: 'application/pdf' } }
-        ];
-
-        let result;
+        let resultText;
         try {
             await this.callWithFallback(async (modelName) => {
-                if (!this.genAI) this.rotateKey();
-                const model = this.genAI.getGenerativeModel({ model: modelName });
-                result = await model.generateContent(contentParts);
+                const response = await this.groq.chat([
+                    { role: "system", content: systemPrompt },
+                    { role: "user", content: userPrompt }
+                ], modelName);
+                resultText = response;
             });
         } catch (e) {
             throw new Error("AI Service Error: " + e.message);
         }
 
-        const jsonText = result.response.text().replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+        const jsonText = resultText.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
         const jsonMatch = jsonText.match(/\{[\s\S]*\}/);
         if (!jsonMatch) throw new Error("No valid JSON found in AI response");
 
