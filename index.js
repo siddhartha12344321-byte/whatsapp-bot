@@ -1446,7 +1446,6 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                     console.error("PDF Quiz Generation Error:", e);
                     const errorMsg = e.message || 'Unknown error';
 
-                    // Provide specific error messages
                     if (errorMsg.includes("empty") || errorMsg.includes("invalid")) {
                         await msg.reply(`❌ PDF Error: ${errorMsg}\n\nPlease send a valid PDF file.`).catch(() => {});
                     } else if (errorMsg.includes("quota") || errorMsg.includes("429")) {
