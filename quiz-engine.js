@@ -62,34 +62,73 @@ class QuizEngine {
         this.quizSessions = new Map();
         this.activePolls = new Map();
 
-        // Models Configuration
-        // Note: Groq is fast, so we mainly use the best model.
-        // Updated to latest supported models (Dec 2025)
-        this.MODELS = [
+        // Groq Models Configuration (Primary)
+        this.GROQ_MODELS = [
             "llama-3.3-70b-versatile",
             "llama-3.1-8b-instant",
             "gemma2-9b-it"
         ];
-        log(`Initialized with ${this.MODELS.length} available models`);
+
+        // Gemini API Key for fallback
+        this.geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY_2;
+
+        log(`Initialized with ${this.GROQ_MODELS.length} Groq models + Gemini fallback`);
     }
 
+    // Try Groq first, then fallback to Gemini
     async callWithFallback(fnGenerator) {
         let lastError = null;
-        for (const modelName of this.MODELS) {
+
+        // TRY 1: All Groq models
+        for (const modelName of this.GROQ_MODELS) {
             try {
                 return await fnGenerator(modelName);
             } catch (e) {
                 lastError = e;
-                console.warn(`⚠️ Model ${modelName} failed: ${e.message}. Retrying...`);
+                console.warn(`⚠️ Groq ${modelName} failed: ${e.message?.substring(0, 50)}. Trying next...`);
                 if (e.message?.includes('429')) {
-                    await sleep(1000); // Wait on rate limit
+                    await sleep(500);
                     continue;
                 }
-                if (modelName === this.MODELS[this.MODELS.length - 1]) break;
             }
         }
-        console.error("🚨 CRITICAL: All AI Models Failed. Last Error:", lastError);
-        throw lastError || new Error("All models failed in QuizEngine");
+
+        // TRY 2: Gemini Fallback
+        if (this.geminiKey) {
+            console.log("🔄 Groq failed, trying Gemini fallback...");
+            try {
+                return await this.callGeminiFallback(fnGenerator);
+            } catch (geminiErr) {
+                console.error("❌ Gemini fallback also failed:", geminiErr.message?.substring(0, 50));
+                lastError = geminiErr;
+            }
+        }
+
+        console.error("🚨 CRITICAL: All AI providers failed. Last Error:", lastError?.message);
+        throw lastError || new Error("All AI providers failed");
+    }
+
+    // Gemini Fallback Implementation
+    async callGeminiFallback(originalFnGenerator) {
+        // This wraps the original function but uses Gemini instead
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${this.geminiKey}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                contents: [{ parts: [{ text: "You are an AI assistant. Respond helpfully." }] }],
+                generationConfig: { temperature: 0.7, maxOutputTokens: 2000 }
+            })
+        });
+
+        if (!response.ok) {
+            const errText = await response.text();
+            throw new Error(`Gemini API Error (${response.status}): ${errText?.substring(0, 100)}`);
+        }
+
+        const data = await response.json();
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        console.log("✅ Gemini fallback successful");
+        return { response: { text: () => text } };
     }
 
     // --- PDF HELPERS ---
@@ -103,8 +142,28 @@ class QuizEngine {
         }
     }
 
-    // --- GENERAL CHAT (New) ---
+    // --- GENERAL CHAT ---
     async chat(messages) {
+        // Try Groq first
+        try {
+            return await this.chatWithGroq(messages);
+        } catch (groqErr) {
+            console.warn("⚠️ Groq chat failed, trying Gemini fallback...");
+
+            // Try Gemini fallback
+            if (this.geminiKey) {
+                try {
+                    return await this.chatWithGemini(messages);
+                } catch (geminiErr) {
+                    console.error("❌ Both providers failed");
+                    throw geminiErr;
+                }
+            }
+            throw groqErr;
+        }
+    }
+
+    async chatWithGroq(messages) {
         return await this.callWithFallback(async (modelName) => {
             const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
                 method: "POST",
@@ -116,18 +175,44 @@ class QuizEngine {
                     model: modelName,
                     messages: messages,
                     temperature: 0.7
-                    // No response_format for general chat to allow free text
                 })
             });
 
             if (!response.ok) {
                 const errText = await response.text();
-                throw new Error(`Chat API Error (${response.status}): ${errText}`);
+                throw new Error(`Groq Chat Error (${response.status}): ${errText?.substring(0, 80)}`);
             }
 
             const data = await response.json();
-            return { response: { text: () => data.choices[0].message.content } }; // Mock Gemini interface
+            return { response: { text: () => data.choices[0].message.content } };
         });
+    }
+
+    async chatWithGemini(messages) {
+        // Convert OpenAI format to Gemini format
+        const geminiContents = messages.map(m => ({
+            role: m.role === 'assistant' ? 'model' : m.role === 'system' ? 'user' : 'user',
+            parts: [{ text: m.content }]
+        }));
+
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${this.geminiKey}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                contents: geminiContents,
+                generationConfig: { temperature: 0.7, maxOutputTokens: 2000 }
+            })
+        });
+
+        if (!response.ok) {
+            const errText = await response.text();
+            throw new Error(`Gemini Chat Error (${response.status}): ${errText?.substring(0, 80)}`);
+        }
+
+        const data = await response.json();
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        console.log("✅ Gemini fallback chat successful");
+        return { response: { text: () => text } };
     }
 
     async generateQuizFromPdfBuffer({ pdfBuffer, topic = 'General', qty = 10, difficulty = 'medium' }) {
