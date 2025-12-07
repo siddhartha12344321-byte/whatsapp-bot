@@ -263,10 +263,11 @@ function normalizeMessagesForGroq(messages) {
     }).filter(m => m.content && m.content.trim().length > 0); // Remove empty messages
 }
 
-// Helper: Analyze image using DeepSeek-VL
-async function analyzeImageWithDeepSeek(media) {
-    if (!DEEPSEEK_API_KEY) {
-        throw new Error("DeepSeek API key not configured");
+// Helper: Analyze image using Groq Vision API (llama-3.2-vision)
+async function analyzeImageWithVision(media, userPrompt = '') {
+    const GROQ_API_KEY = process.env.GROQ_API_KEY;
+    if (!GROQ_API_KEY) {
+        throw new Error("Groq API key not configured");
     }
 
     try {
@@ -274,23 +275,25 @@ async function analyzeImageWithDeepSeek(media) {
         const base64Image = typeof media.data === 'string' ? media.data : Buffer.from(media.data).toString('base64');
         const mimeType = media.mimetype || 'image/jpeg';
 
-        console.log("📡 Sending image to DeepSeek-VL for analysis...");
+        console.log("📡 Sending image to Groq Vision for analysis...");
 
-        const response = await fetch('https://api.deepseek.com/chat/completions', {
+        const analysisPrompt = userPrompt || 'Please analyze this image and describe its contents in detail. If it contains math problems, solve them step by step. If it contains text, extract and read it clearly.';
+
+        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${DEEPSEEK_API_KEY}`
+                'Authorization': `Bearer ${GROQ_API_KEY}`
             },
             body: JSON.stringify({
-                model: 'deepseek-vl',
+                model: 'llama-3.2-90b-vision-preview',
                 messages: [
                     {
                         role: 'user',
                         content: [
                             {
                                 type: 'text',
-                                text: 'Please analyze this image and describe its contents in detail. If it contains math problems, text, or diagrams, describe them clearly.'
+                                text: analysisPrompt
                             },
                             {
                                 type: 'image_url',
@@ -301,27 +304,28 @@ async function analyzeImageWithDeepSeek(media) {
                         ]
                     }
                 ],
-                max_tokens: 1000
+                max_tokens: 1500,
+                temperature: 0.3
             })
         });
 
         if (!response.ok) {
             const errorData = await response.json();
-            console.error("DeepSeek API error:", errorData);
-            throw new Error(`DeepSeek API error: ${response.status} - ${errorData?.error?.message || 'Unknown error'}`);
+            console.error("Groq Vision API error:", errorData);
+            throw new Error(`Groq Vision API error: ${response.status} - ${errorData?.error?.message || 'Unknown error'}`);
         }
 
         const data = await response.json();
         const description = data.choices?.[0]?.message?.content;
 
         if (!description) {
-            throw new Error("No image description received from DeepSeek");
+            throw new Error("No image description received from Groq Vision");
         }
 
         console.log("✅ Image analysis successful");
         return description;
     } catch (err) {
-        console.error("❌ DeepSeek image analysis failed:", err.message);
+        console.error("❌ Groq Vision image analysis failed:", err.message);
         throw err;
     }
 }
@@ -1316,23 +1320,29 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
             const media = await msg.downloadMedia();
             console.log(`📎 Media received: ${media.mimetype}, prompt: ${prompt.substring(0, 50)}`);
 
-            // Handle images - describe them since Groq doesn't support vision
+            // Handle images - analyze with Groq Vision
             if (media.mimetype.startsWith('image/')) {
-                console.log("🖼️ Image detected - analyzing with DeepSeek-VL...");
+                console.log("🖼️ Image detected - analyzing with Groq Vision...");
                 try {
-                    const imageDescription = await analyzeImageWithDeepSeek(media);
+                    const imageDescription = await analyzeImageWithVision(media, prompt);
                     console.log("📸 Image analysis complete");
 
-                    // Use the image description as additional context
-                    const enhancedPrompt = `Image content: ${imageDescription}\n\nUser request: ${prompt}`;
+                    // Use the image description as the response directly if it's detailed enough
+                    // Or combine with AI for more context
+                    const enhancedPrompt = `Based on this image analysis: ${imageDescription}\n\nUser's question: ${prompt}\n\nProvide a clear, helpful response.`;
 
                     // Send to AI with enhanced context
                     try {
-                        const response = await quizEngine.chat(enhancedPrompt, normalizeMessagesForGroq(chatHistory.get(chatId) || []));
-                        if (response) {
-                            updateHistory(chatId, 'user', enhancedPrompt);
-                            updateHistory(chatId, 'assistant', response);
-                            await msg.reply(response).catch(replyErr => {
+                        const messagesArray = [
+                            { role: "system", content: "You are a helpful assistant that answers questions about images. Be concise and accurate." },
+                            { role: "user", content: enhancedPrompt }
+                        ];
+                        const chatResult = await quizEngine.chat(messagesArray);
+                        const responseText = chatResult?.response?.text() || chatResult || '';
+                        if (responseText && responseText.length > 0) {
+                            updateHistory(chatId, 'user', prompt);
+                            updateHistory(chatId, 'assistant', responseText);
+                            await msg.reply(responseText).catch(replyErr => {
                                 console.warn("⚠️ Could not send reply:", replyErr.message?.substring(0, 50));
                             });
                         }
