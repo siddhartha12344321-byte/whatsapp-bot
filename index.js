@@ -286,7 +286,7 @@ async function analyzeImageWithVision(media, userPrompt = '') {
                 'Authorization': `Bearer ${GROQ_API_KEY}`
             },
             body: JSON.stringify({
-                model: 'llama-3.2-90b-vision-preview',
+                model: 'llama-3.2-11b-vision-preview',
                 messages: [
                     {
                         role: 'user',
@@ -633,12 +633,12 @@ async function deployQuizToGroup(quizId, groupId) {
         const quiz = await WebQuiz.findById(quizId);
         if (!quiz || !client) return;
 
-        // Convert web quiz format to QuizEngine format (must use correct_index)
+        // Convert web quiz format to QuizEngine format (must match exactly)
         const questions = quiz.questions.map((q, i) => ({
             question: q.question,
             options: q.options,
-            correct_index: q.correctIndex,  // QuizEngine uses correct_index not correct
-            explanation: q.explanation
+            correct_index: q.correctIndex,  // QuizEngine uses correct_index
+            answer_explanation: q.explanation || 'No explanation provided'  // QuizEngine uses answer_explanation
         }));
 
         // Get the chat
