@@ -143,34 +143,52 @@ const rateLimit = new Map();
 
 // Enhanced memory function - saves to MongoDB AND Pinecone
 async function updateHistory(chatId, role, text, userId = null) {
+    // Validate inputs
+    if (!chatId || !role || !text || typeof text !== 'string') {
+        console.warn("⚠️ Invalid updateHistory call:", { chatId, role, text: typeof text, textLength: text?.length });
+        return; // Skip if invalid
+    }
+    
+    // Clean and validate text
+    const cleanText = String(text).trim();
+    if (cleanText.length === 0) {
+        console.warn("⚠️ Empty text in updateHistory, skipping save");
+        return; // Don't save empty messages
+    }
+    
     // Update in-memory cache (for immediate use)
     if (!chatHistory.has(chatId)) chatHistory.set(chatId, []);
     const history = chatHistory.get(chatId);
-    history.push({ role, parts: [{ text }] });
+    history.push({ role, parts: [{ text: cleanText }] });
     if (history.length > 20) history.shift(); // Keep last 20 turns in memory
     
     // Save to MongoDB for persistence (async, don't wait)
-    if (userId || chatId) {
+    if ((userId || chatId) && cleanText.length > 0) {
+        const userIdValue = userId || chatId.split('@')[0] || 'unknown';
+        const textToSave = cleanText.substring(0, 5000); // Limit text length
+        
         ChatHistory.create({
-            chatId: chatId,
-            userId: userId || chatId.split('@')[0],
-            role: role,
-            text: text.substring(0, 5000), // Limit text length
+            chatId: String(chatId),
+            userId: String(userIdValue),
+            role: String(role),
+            text: textToSave,
             timestamp: new Date()
-        }).catch(err => console.error("Error saving chat history:", err));
+        }).catch(err => {
+            console.error("Error saving chat history:", err.message || err);
+        });
     }
     
     // Save important conversations to Pinecone for semantic search
     // Only save user messages and important model responses
-    if (role === 'user' || (role === 'model' && text.length > 100)) {
+    if (cleanText.length > 0 && (role === 'user' || (role === 'model' && cleanText.length > 100))) {
         const memoryId = `chat_${chatId}_${Date.now()}`;
         const memoryText = role === 'user' 
-            ? `User said: ${text}`
-            : `Bot responded: ${text}`;
+            ? `User said: ${cleanText}`
+            : `Bot responded: ${cleanText}`;
         
         // Save to Pinecone asynchronously (don't block)
         upsertToPinecone(memoryText, memoryId).catch(err => 
-            console.error("Error saving to Pinecone:", err)
+            console.error("Error saving to Pinecone:", err.message || err)
         );
     }
 }
