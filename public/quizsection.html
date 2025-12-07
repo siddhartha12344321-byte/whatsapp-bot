@@ -230,6 +230,52 @@
             }
         }
 
+        /* Toggle Switch */
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 50px;
+            height: 26px;
+        }
+
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #444;
+            transition: 0.3s;
+            border-radius: 26px;
+        }
+
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 20px;
+            width: 20px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: 0.3s;
+            border-radius: 50%;
+        }
+
+        input:checked+.slider {
+            background: linear-gradient(135deg, #00ff88, #00cc6a);
+        }
+
+        input:checked+.slider:before {
+            transform: translateX(24px);
+        }
+
         /* Modal/Panel Styles */
         .panel {
             display: none;
@@ -423,27 +469,80 @@
         <div class="section">
             <h2>📝 Create New Quiz</h2>
             <input type="text" id="quizTitle" placeholder="Quiz Title (e.g., Geography Chapter 5)">
-            <select id="targetGroup">
-                <option value="">Select WhatsApp Group</option>
-            </select>
-            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                <div>
-                    <label style="font-size: 0.9rem;">Seconds per question:</label>
-                    <input type="number" id="timer" value="30" min="10" max="300" style="width: 100px;">
-                </div>
-                <div style="flex: 1;">
-                    <label style="font-size: 0.9rem;">Schedule (optional):</label>
-                    <input type="datetime-local" id="scheduledTime">
-                </div>
-            </div>
 
             <h3 style="margin-top: 20px; color: #00ff88;">Questions</h3>
             <div id="questionsContainer"></div>
             <button class="btn btn-secondary" onclick="addQuestion()">+ Add Question</button>
-            <div style="margin-top: 20px; display: flex; gap: 10px; flex-wrap: wrap;">
-                <button class="btn" onclick="saveQuiz('draft')">💾 Save Draft</button>
-                <button class="btn" onclick="saveQuiz('scheduled')">⏰ Schedule Quiz</button>
-                <button class="btn" onclick="deployNow()">🚀 Deploy Now</button>
+
+            <!-- Deployment Options -->
+            <div style="margin-top: 30px; padding: 20px; background: rgba(0,0,0,0.3); border-radius: 15px;">
+                <h3 style="color: #00ff88; margin-bottom: 20px;">🎯 Deployment Options</h3>
+
+                <!-- Step 1: Select Group -->
+                <div
+                    style="margin-bottom: 20px; padding: 15px; background: rgba(255,255,255,0.05); border-radius: 10px; border-left: 4px solid #00ff88;">
+                    <label style="font-size: 1.1rem; color: #00ff88; font-weight: bold;">1️⃣ Select WhatsApp Group
+                        *</label>
+                    <select id="targetGroup" style="margin-top: 10px;">
+                        <option value="">-- Choose Group --</option>
+                    </select>
+                </div>
+
+                <!-- Step 2: Report Card Option -->
+                <div
+                    style="margin-bottom: 20px; padding: 15px; background: rgba(255,255,255,0.05); border-radius: 10px; border-left: 4px solid #7c3aed;">
+                    <label style="font-size: 1.1rem; color: #a78bfa; font-weight: bold;">🎛️ Report Card Mode</label>
+                    <div style="display: flex; align-items: center; gap: 15px; margin-top: 10px;">
+                        <label class="switch">
+                            <input type="checkbox" id="autoReportCard" checked>
+                            <span class="slider"></span>
+                        </label>
+                        <span id="reportCardLabel" style="color: #aaa;">Auto Report (after quiz ends)</span>
+                    </div>
+                    <p style="color: #666; font-size: 0.85rem; margin-top: 8px;">Toggle OFF to manually trigger report
+                        card from this panel</p>
+                </div>
+
+                <!-- Deploy Now Option -->
+                <div
+                    style="margin-bottom: 20px; padding: 20px; background: linear-gradient(135deg, rgba(0,255,136,0.1), rgba(0,204,106,0.05)); border-radius: 12px; border: 1px solid rgba(0,255,136,0.3);">
+                    <label style="font-size: 1.1rem; color: #00ff88; font-weight: bold;">2️⃣ Deploy Now
+                        (Instant)</label>
+                    <p style="color: #888; font-size: 0.9rem; margin: 8px 0;">Sends all questions one-by-one with 30s
+                        timer</p>
+                    <button class="btn" onclick="deployNow()" style="margin-top: 10px; width: 100%;">🚀 DEPLOY
+                        NOW</button>
+                </div>
+
+                <!-- Schedule Option with Time Interval -->
+                <div
+                    style="padding: 20px; background: linear-gradient(135deg, rgba(255,153,0,0.1), rgba(204,119,0,0.05)); border-radius: 12px; border: 1px solid rgba(255,153,0,0.3);">
+                    <label style="font-size: 1.1rem; color: #ff9900; font-weight: bold;">3️⃣ Schedule Quiz</label>
+                    <p style="color: #888; font-size: 0.9rem; margin: 8px 0 15px 0;">Set date/time and custom interval
+                        between questions</p>
+
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+                        <div>
+                            <label style="font-size: 0.9rem; color: #ff9900;">📅 Start Date & Time:</label>
+                            <input type="datetime-local" id="scheduledTime" style="margin-top: 5px;">
+                        </div>
+                        <div>
+                            <label style="font-size: 0.9rem; color: #ff9900;">⏱️ Seconds per Question:</label>
+                            <input type="number" id="timer" value="30" min="10" max="600" style="margin-top: 5px;">
+                        </div>
+                    </div>
+
+                    <button class="btn"
+                        style="margin-top: 15px; width: 100%; background: linear-gradient(135deg, #ff9900, #cc7700);"
+                        onclick="scheduleQuiz()">📅 SCHEDULE QUIZ</button>
+                </div>
+
+                <!-- Save Draft -->
+                <div
+                    style="margin-top: 20px; text-align: center; padding-top: 15px; border-top: 1px solid rgba(255,255,255,0.1);">
+                    <button class="btn btn-secondary" onclick="saveQuiz('draft')" style="padding: 12px 40px;">💾 Save as
+                        Draft</button>
+                </div>
             </div>
         </div>
 
@@ -619,8 +718,101 @@
 
         function deployNow() {
             const group = document.getElementById('targetGroup').value;
-            if (!group) return alert('Please select a WhatsApp group');
-            saveQuiz('active');
+            if (!group) return alert('Please select a WhatsApp group first!');
+
+            const title = document.getElementById('quizTitle').value;
+            if (!title) return alert('Please enter a quiz title');
+
+            const questions = collectQuestions();
+            if (questions.length === 0) return alert('Please add at least one question');
+
+            const autoReport = document.getElementById('autoReportCard').checked;
+
+            if (!confirm('Deploy quiz now?\n\nQuestions: ' + questions.length + '\nAuto Report: ' + (autoReport ? 'YES' : 'NO (Manual)'))) return;
+
+            const data = {
+                title: title,
+                creator: currentCreator,
+                questions: questions,
+                status: 'active',
+                targetGroup: group,
+                timer: 30,  // Default 30s for instant deploy
+                scheduledTime: null,
+                autoReportCard: autoReport
+            };
+
+            fetch('/api/quiz/create', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            })
+                .then(r => r.json())
+                .then(result => {
+                    if (result.success) {
+                        alert('🚀 Quiz deployed successfully!\n\nCheck WhatsApp group now.');
+                        document.getElementById('quizTitle').value = '';
+                        document.getElementById('questionsContainer').innerHTML = '';
+                        questionCount = 0;
+                        addQuestion();
+                        loadQuizzes();
+                    } else {
+                        alert('Error: ' + (result.error || 'Unknown error'));
+                    }
+                })
+                .catch(e => alert('Deployment failed: ' + e.message));
+        }
+
+        function scheduleQuiz() {
+            const group = document.getElementById('targetGroup').value;
+            if (!group) return alert('Please select a WhatsApp group first!');
+
+            const scheduledTime = document.getElementById('scheduledTime').value;
+            if (!scheduledTime) return alert('Please select a date and time for scheduling');
+
+            const title = document.getElementById('quizTitle').value;
+            if (!title) return alert('Please enter a quiz title');
+
+            const questions = collectQuestions();
+            if (questions.length === 0) return alert('Please add at least one question');
+
+            const timer = parseInt(document.getElementById('timer').value) || 30;
+            const autoReport = document.getElementById('autoReportCard').checked;
+            const schedDate = new Date(scheduledTime);
+
+            if (schedDate <= new Date()) return alert('Please select a future date and time');
+
+            if (!confirm('Schedule quiz?\n\n📅 ' + schedDate.toLocaleString() + '\n⏱️ ' + timer + 's per question\n📊 Auto Report: ' + (autoReport ? 'YES' : 'NO'))) return;
+
+            const data = {
+                title: title,
+                creator: currentCreator,
+                questions: questions,
+                status: 'scheduled',
+                targetGroup: group,
+                timer: timer,
+                scheduledTime: scheduledTime,
+                autoReportCard: autoReport
+            };
+
+            fetch('/api/quiz/create', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            })
+                .then(r => r.json())
+                .then(result => {
+                    if (result.success) {
+                        alert('📅 Quiz scheduled!\n\nWill start at: ' + schedDate.toLocaleString());
+                        document.getElementById('quizTitle').value = '';
+                        document.getElementById('questionsContainer').innerHTML = '';
+                        questionCount = 0;
+                        addQuestion();
+                        loadQuizzes();
+                    } else {
+                        alert('Error: ' + (result.error || 'Unknown error'));
+                    }
+                })
+                .catch(e => alert('Scheduling failed: ' + e.message));
         }
 
         function deleteQuiz(id) {
@@ -649,6 +841,13 @@
                 })
                 .catch(e => alert('Deployment failed: ' + e.message));
         }
+
+        // Toggle switch label update
+        document.getElementById('autoReportCard')?.addEventListener('change', function () {
+            const label = document.getElementById('reportCardLabel');
+            label.textContent = this.checked ? 'Auto Report (after quiz ends)' : 'Manual Report (trigger from panel)';
+            label.style.color = this.checked ? '#00ff88' : '#ff9900';
+        });
     </script>
 </body>
 

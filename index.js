@@ -497,6 +497,7 @@ const webQuizSchema = new mongoose.Schema({
     timer: { type: Number, default: 30 },
     scheduledTime: Date,
     status: { type: String, default: 'draft', enum: ['draft', 'scheduled', 'active', 'completed'] },
+    autoReportCard: { type: Boolean, default: true },
     createdAt: { type: Date, default: Date.now }
 });
 const WebQuiz = mongoose.model('WebQuiz', webQuizSchema);
@@ -541,7 +542,7 @@ app.get('/api/quiz/list', async (req, res) => {
 // API: Create a new quiz
 app.post('/api/quiz/create', async (req, res) => {
     try {
-        const { title, creator, questions, targetGroup, timer, scheduledTime, status } = req.body;
+        const { title, creator, questions, targetGroup, timer, scheduledTime, status, autoReportCard } = req.body;
         const quiz = new WebQuiz({
             title,
             creator: creator ? creator.toUpperCase() : 'SIDDHARTHA',
@@ -549,7 +550,8 @@ app.post('/api/quiz/create', async (req, res) => {
             targetGroup,
             timer: timer || 30,
             scheduledTime: scheduledTime ? new Date(scheduledTime) : null,
-            status: status || 'draft'
+            status: status || 'draft',
+            autoReportCard: autoReportCard !== false  // Default true
         });
         await quiz.save();
 
