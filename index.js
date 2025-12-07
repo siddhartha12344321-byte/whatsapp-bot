@@ -101,24 +101,26 @@ const User = mongoose.model('User', userSchema);
 
 // Chat History Schema for persistent memory
 const chatHistorySchema = new mongoose.Schema({
-    chatId: { type: String, required: true, index: true },
-    userId: { type: String, required: true, index: true },
+    chatId: { type: String, required: true },
+    userId: { type: String, required: true },
     role: { type: String, required: true, enum: ['user', 'model'] },
     text: { type: String, required: true },
-    timestamp: { type: Date, default: Date.now, index: true },
+    timestamp: { type: Date, default: Date.now },
     metadata: { type: mongoose.Schema.Types.Mixed, default: {} }
 }, { timestamps: true });
 
-// Compound index for efficient queries
+// Compound indexes for efficient queries (removed individual indexes to avoid duplicates)
 chatHistorySchema.index({ chatId: 1, timestamp: -1 });
 chatHistorySchema.index({ userId: 1, timestamp: -1 });
+chatHistorySchema.index({ chatId: 1 }); // For quick chat lookup
+chatHistorySchema.index({ userId: 1 }); // For user lookup
 
 const ChatHistory = mongoose.model('ChatHistory', chatHistorySchema);
 
 // Memory Summary Schema - stores important facts about users
 const memorySchema = new mongoose.Schema({
-    chatId: { type: String, required: true, index: true },
-    userId: { type: String, required: true, index: true },
+    chatId: { type: String, required: true },
+    userId: { type: String, required: true },
     key: { type: String, required: true }, // e.g., "name", "preference", "goal"
     value: { type: String, required: true },
     context: { type: String }, // Additional context
@@ -126,8 +128,10 @@ const memorySchema = new mongoose.Schema({
     importance: { type: Number, default: 1 } // 1-10, higher = more important
 }, { timestamps: true });
 
-memorySchema.index({ chatId: 1, key: 1 });
-memorySchema.index({ userId: 1 });
+// Indexes (removed individual indexes from schema to avoid duplicates)
+memorySchema.index({ chatId: 1, key: 1 }); // Compound index for chat+key lookup
+memorySchema.index({ userId: 1 }); // For user memory lookup
+memorySchema.index({ chatId: 1 }); // For chat memory lookup
 
 const Memory = mongoose.model('Memory', memorySchema);
 
@@ -1380,41 +1384,88 @@ Students want QUICK, CLEAR answers - not essays! Be attractive, concise, easy to
 
 // --- INITIALIZATION ---
 async function startClient() {
+    console.log('🔄 Starting bot initialization...');
+    
+    // Connect to MongoDB (don't block if it fails, but log error)
     console.log('🔄 Connecting to MongoDB...');
-    try {
-        await mongoose.connect(MONGODB_URI);
-        console.log('🍃 MongoDB Connected');
-    } catch (err) {
-        console.error('❌ MongoDB Connection Error:', err);
-        return; // Stop if DB fails
-    }
+    mongoose.connect(MONGODB_URI, {
+        serverSelectionTimeoutMS: 10000, // 10 second timeout
+        socketTimeoutMS: 45000,
+    }).then(() => {
+        console.log('🍃 MongoDB Connected Successfully');
+    }).catch((err) => {
+        console.error('⚠️ MongoDB Connection Warning:', err.message);
+        console.log('⚠️ Continuing without MongoDB - some features may be limited');
+    });
 
-    console.log('🔄 Init Client with RemoteAuth...');
-    const store = new MongoStore({ mongoose: mongoose });
+    console.log('🔄 Initializing WhatsApp Client...');
+    let store;
+    try {
+        store = new MongoStore({ mongoose: mongoose });
+        console.log('💾 MongoStore initialized');
+    } catch (err) {
+        console.error('⚠️ MongoStore Error:', err.message);
+        console.log('⚠️ Using LocalAuth as fallback');
+        // Fallback to LocalAuth if MongoStore fails
+    }
 
     let puppetConfig = {
         headless: true,
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
     };
+    
     if (process.platform === 'win32') {
         puppetConfig.executablePath = `${process.env.LOCALAPPDATA}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`;
         puppetConfig.headless = false;
     } else {
-        puppetConfig.executablePath = await chromium.executablePath();
+        try {
+            puppetConfig.executablePath = await chromium.executablePath();
+        } catch (err) {
+            console.error('⚠️ Chromium path error:', err.message);
+        }
     }
 
-    client = new Client({
-        authStrategy: new RemoteAuth({ store: store, backupSyncIntervalMs: 60000 }),
-        puppeteer: puppetConfig
-    });
+    try {
+        client = new Client({
+            authStrategy: store ? new RemoteAuth({ store: store, backupSyncIntervalMs: 60000 }) : new LocalAuth(),
+            puppeteer: puppetConfig
+        });
 
-    client.on('qr', (qr) => { qrCodeData = qr; qrcode.generate(qr, { small: true }); console.log("⚡ SCAN QR"); });
-    client.on('ready', () => { console.log("✅ Ready"); qrCodeData = ""; });
-    client.on('vote_update', handleVote);
-    client.on('message', handleMessage);
-    client.on('remote_session_saved', () => console.log('💾 Saved Session'));
+        client.on('qr', (qr) => { 
+            qrCodeData = qr; 
+            qrcode.generate(qr, { small: true }); 
+            console.log("⚡ SCAN QR CODE TO CONNECT"); 
+        });
+        
+        client.on('ready', () => { 
+            console.log("✅✅✅ BOT IS READY! ✅✅✅"); 
+            console.log("✅ WhatsApp Connected Successfully");
+            qrCodeData = ""; 
+        });
+        
+        client.on('authenticated', () => {
+            console.log("🔐 Authentication successful");
+        });
+        
+        client.on('auth_failure', (msg) => {
+            console.error("❌ Authentication failed:", msg);
+        });
+        
+        client.on('disconnected', (reason) => {
+            console.log("⚠️ Client disconnected:", reason);
+        });
+        
+        client.on('vote_update', handleVote);
+        client.on('message', handleMessage);
+        client.on('remote_session_saved', () => console.log('💾 Session saved to database'));
 
-    await client.initialize();
+        console.log('🔄 Initializing WhatsApp client...');
+        await client.initialize();
+        console.log('✅ Client initialization complete');
+    } catch (err) {
+        console.error('❌ Failed to initialize WhatsApp client:', err);
+        throw err;
+    }
 }
 
 startClient();
