@@ -39,7 +39,7 @@ function rotateKey() {
 function getModel() {
     if (!genAI) rotateKey();
     return genAI.getGenerativeModel({
-        model: "gemini-2.0-flash", // User Verified Model
+        model: "gemini-2.5-flash", // Latest stable flash model (fast and efficient)
         safetySettings: [
             { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
             { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
@@ -47,22 +47,46 @@ function getModel() {
     });
 }
 
-// ... Data Schemas ...
-
-// ... (Skip to Helper Functions) ...
-
-async function getEmbedding(text) {
+// Helper function to extract retry delay from error
+function extractRetryDelay(error) {
     try {
-        return await callWithRetry(async () => {
-            if (!genAI) rotateKey();
-            const model = genAI.getGenerativeModel({ model: "text-embedding-004" }); // CORRECT MODEL
-            const result = await model.embedContent(text);
-            return result.embedding.values;
-        });
+        if (error.errorDetails) {
+            for (const detail of error.errorDetails) {
+                if (detail['@type'] === 'type.googleapis.com/google.rpc.RetryInfo' && detail.retryDelay) {
+                    const delay = parseFloat(detail.retryDelay);
+                    return isNaN(delay) ? 30 : Math.ceil(delay);
+                }
+            }
+        }
+        // Try to parse from error message
+        const match = error.message?.match(/Please retry in ([\d.]+)s/);
+        if (match) {
+            return Math.ceil(parseFloat(match[1]));
+        }
     } catch (e) {
-        console.error("Embedding Error (Final):", e.message);
-        return null; // Fail gracefully
+        // Ignore parsing errors
     }
+    return 30; // Default 30 seconds
+}
+
+// Check if error is a quota/quota exhaustion error
+function isQuotaError(error) {
+    if (!error) return false;
+    const message = error.message || '';
+    const status = error.status || '';
+    return status === 429 || 
+           message.includes('429') || 
+           message.includes('quota') || 
+           message.includes('Quota exceeded') ||
+           message.includes('rate limit');
+}
+
+// Check if error is a 404 (model not found)
+function isModelNotFoundError(error) {
+    if (!error) return false;
+    const status = error.status || '';
+    const message = error.message || '';
+    return status === 404 || message.includes('404') || message.includes('not found');
 }
 
 // --- DATA SCHEMAS ---
@@ -139,40 +163,84 @@ async function updateUserProfile(userId, name, topic, scoreToAdd = 0) {
 const util = require('util');
 const sleep = util.promisify(setTimeout);
 
+// Updated model list with official model names (prioritized by stability and performance)
 const MODELS = [
-    "gemini-2.0-flash",       // Priority 1: Newest/Fastest
-    "gemini-1.5-flash",       // Priority 2: Standard Reliable
-    "gemini-1.5-flash-8b",    // Priority 3: Ultra Lite
-    "gemini-1.5-pro",         // Priority 4: High Intelligence
-    "gemini-1.0-pro"          // Priority 5: Legacy Fallback
+    "gemini-2.5-flash",                    // Priority 1: Latest stable flash (fastest, most efficient)
+    "gemini-2.5-pro",                      // Priority 2: Latest stable pro (highest intelligence)
+    "gemini-2.0-flash",                    // Priority 3: Previous stable flash version
+    "gemini-flash-latest",                 // Priority 4: Latest flash alias (auto-updates)
+    "gemini-pro-latest",                   // Priority 5: Latest pro alias (auto-updates)
+    "gemini-2.0-flash-001",                // Priority 6: Specific flash version
+    "gemini-2.5-flash-lite",               // Priority 7: Lite version (lower resource usage)
+    "gemini-2.0-flash-lite"                // Priority 8: Previous lite version
 ];
 
 async function callWithFallback(fnGenerator) {
+    let lastError = null;
+    let quotaExhausted = false;
+    
     for (const modelName of MODELS) {
         try {
             // fnGenerator takes a modelName and returns a Promise
             return await fnGenerator(modelName);
         } catch (e) {
-            console.warn(`⚠️ Model ${modelName} Failed: ${e.message}`);
-            // If it's a 429 or 503 (Overload), we continue to next model.
-            // If it's 400 (Bad Request), strictly speaking we should stop, but for safety lets try others.
-            if (modelName === MODELS[MODELS.length - 1]) throw e; // All models failed
+            lastError = e;
+            const errorMsg = e.message || '';
+            const errorStatus = e.status || '';
+            
+            console.warn(`⚠️ Model ${modelName} Failed: ${errorMsg.substring(0, 100)}`);
+            
+            // If it's a 404 (model not found), skip to next model immediately
+            if (isModelNotFoundError(e)) {
+                console.log(`⏭️  Model ${modelName} not available, trying next...`);
+                continue;
+            }
+            
+            // If it's a quota error, try rotating key and wait
+            if (isQuotaError(e)) {
+                console.log(`⏳ Quota error for ${modelName}, rotating key and waiting...`);
+                rotateKey();
+                const retryDelay = extractRetryDelay(e);
+                console.log(`⏰ Waiting ${retryDelay}s before trying next model...`);
+                await sleep(retryDelay * 1000);
+                quotaExhausted = true;
+                continue; // Try next model
+            }
+            
+            // For other errors (400, 500, etc.), continue to next model
+            if (modelName === MODELS[MODELS.length - 1]) {
+                // Last model failed
+                break;
+            }
         }
     }
+    
+    // If we get here, all models failed
+    if (quotaExhausted) {
+        throw new Error("All API keys have exceeded quota. Please wait or upgrade your plan.");
+    }
+    throw lastError || new Error("All models failed");
 }
 
 // Keep simple retry for Embeddings as they have only 1 model
 async function callWithRetry(fn, retries = 3) {
     for (let i = 0; i < retries; i++) {
-        try { return await fn(); }
-        catch (e) {
-            if (e.message && e.message.includes("429")) {
+        try { 
+            return await fn(); 
+        } catch (e) {
+            if (isQuotaError(e)) {
+                console.log(`⏳ Embedding quota error, attempt ${i + 1}/${retries}`);
                 rotateKey();
-                await sleep(2000 * (i + 1));
-            } else throw e;
+                const retryDelay = extractRetryDelay(e);
+                const backoffDelay = Math.max(retryDelay * 1000, 2000 * (i + 1));
+                console.log(`⏰ Waiting ${backoffDelay/1000}s before retry...`);
+                await sleep(backoffDelay);
+            } else {
+                throw e;
+            }
         }
     }
-    throw new Error("Max retries exceeded.");
+    throw new Error("Max retries exceeded for embeddings.");
 }
 
 async function getEmbedding(text) {
@@ -223,7 +291,13 @@ async function generateQuizFromPdfBuffer({ pdfBuffer, topic = 'General', qty = 1
             const model = genAI.getGenerativeModel({ model: modelName });
             result = await model.generateContent(contentParts);
         });
-    } catch (e) { throw new Error("AI Overloaded (429) during Quiz Gen."); }
+    } catch (e) {
+        const errorMsg = e.message || '';
+        if (errorMsg.includes("quota") || errorMsg.includes("429")) {
+            throw new Error("AI quota exceeded during quiz generation. Please try again later.");
+        }
+        throw new Error("AI service error during quiz generation: " + errorMsg.substring(0, 100));
+    }
 
     const jsonMatch = result.response.text().match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error("No JSON found");
@@ -436,7 +510,16 @@ async function handleMessage(msg) {
             });
         } catch (err) {
             console.error("🔥 All Models Failed:", err);
-            await msg.reply("⚠️ AI System Busy. Please wait 1m.");
+            const errorMsg = err.message || '';
+            
+            // Provide user-friendly error messages
+            if (errorMsg.includes("quota") || errorMsg.includes("Quota exceeded")) {
+                await msg.reply("⚠️ API quota exceeded. Please wait a few minutes or contact the administrator.");
+            } else if (errorMsg.includes("429")) {
+                await msg.reply("⚠️ Rate limit reached. Please wait a moment and try again.");
+            } else {
+                await msg.reply("⚠️ AI service temporarily unavailable. Please try again in a moment.");
+            }
             return;
         }
 
