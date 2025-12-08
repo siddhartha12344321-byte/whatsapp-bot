@@ -2,17 +2,20 @@ import makeWASocket, { useMultiFileAuthState, fetchLatestBaileysVersion, getAggr
 import pino from 'pino';
 import express from 'express';
 import qrcode from 'qrcode-terminal';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { QuizEngine } from './quiz-engine.js';
 
 // ---------- Configuration ----------
 const PORT = process.env.PORT || 3000;
-const app = express();
-
-// Serve static files from public folder
-import path from 'path';
-import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Module-level socket reference
+let sock = null;
+
+// ---------- Express App ----------
+const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
 
@@ -27,11 +30,15 @@ app.get('/quizsection', (req, res) => {
 });
 app.listen(PORT, () => console.log(`🚀 Express server listening on ${PORT}`));
 
+// ---------- Quiz Engine ----------
+const quizEngine = new QuizEngine(process.env.GROQ_API_KEY);
+
 // ---------- Baileys Socket ----------
 async function startSock() {
-    const { state, saveState } = await useMultiFileAuthState('./auth_info');
+    const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
     const { version } = await fetchLatestBaileysVersion();
-    const sock = makeWASocket({
+
+    sock = makeWASocket({
         version,
         auth: state,
         printQRInTerminal: false,
@@ -39,17 +46,17 @@ async function startSock() {
     });
 
     // Persist credentials
-    sock.ev.on('creds.update', saveState);
+    sock.ev.on('creds.update', saveCreds);
 
     // QR code handling
-    sock.ev.on('qr', qr => {
-        qrcode.generate(qr, { small: true });
-        console.log('📱 Scan QR code to authenticate');
-    });
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect, qr } = update;
 
-    // Connection updates (reconnect on disconnect)
-    sock.ev.on('connection.update', update => {
-        const { connection, lastDisconnect } = update;
+        if (qr) {
+            qrcode.generate(qr, { small: true });
+            console.log('📱 Scan QR code to authenticate');
+        }
+
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect?.error?.output?.statusCode ?? 0) !== DisconnectReason.loggedOut;
             console.log('❌ Connection closed. Reconnect?', shouldReconnect);
@@ -59,9 +66,6 @@ async function startSock() {
         }
     });
 
-    // ---------- Message handling ----------
-    const quizEngine = new QuizEngine(process.env.GROQ_API_KEY);
-
     // Helper to extract plain text from incoming messages
     const extractText = msg => {
         if (msg.message?.conversation) return msg.message.conversation;
@@ -69,31 +73,32 @@ async function startSock() {
         return '';
     };
 
-    // Incoming messages (including polls)
-    sock.ev.on('messages.upsert', async ({ messages }) => {
+    // Incoming messages
+    sock.ev.on('messages.upsert', async (upsert) => {
+        const messages = upsert.messages || [];
         for (const msg of messages) {
-            if (msg.key.fromMe) continue; // ignore own messages
+            if (msg.key.fromMe) continue;
             const text = extractText(msg);
             if (!text) continue;
-            // Simple echo / placeholder – you can integrate your existing handleMessage logic here
             console.log('📩 Received:', text);
-            // Example reply using Baileys format
             await sock.sendMessage(msg.key.remoteJid, { text: `You said: ${text}` });
         }
     });
 
-    // Poll vote updates – forward to quiz engine if needed
-    sock.ev.on('messages.update', async ({ messages }) => {
-        for (const upd of messages) {
-            if (!upd.pollUpdateMessage) continue;
-            const pollMsg = await getAggregateVotesInPollMessage(upd);
-            if (pollMsg) {
-                // Forward to your quiz engine (adjust method name as needed)
-                try {
+    // Poll vote updates
+    sock.ev.on('messages.update', async (updates) => {
+        for (const upd of updates) {
+            if (!upd.update?.pollUpdates) continue;
+            try {
+                const pollMsg = await getAggregateVotesInPollMessage({
+                    message: upd.update,
+                    key: upd.key
+                });
+                if (pollMsg) {
                     await quizEngine.handleVote(pollMsg);
-                } catch (e) {
-                    console.error('⚠️ Error handling poll vote:', e);
                 }
+            } catch (e) {
+                console.error('⚠️ Error handling poll vote:', e);
             }
         }
     });
