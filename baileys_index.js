@@ -428,11 +428,15 @@ async function startSock() {
     // Auth
     const { state, saveCreds } = await useMongoDBAuthState(authCollection);
 
+    // Fetch latest version
+    const { version, isLatest } = await fetchLatestBaileysVersion();
+    console.log(`using WA v${version.join('.')}, isLatest: ${isLatest}`);
+
     sock = makeWASocket({
+        version,
         auth: state,
-        printQRInTerminal: false,
         logger: pino({ level: 'info' }),
-        browser: ["UPSC Bot", "Chrome", "1.0.0"],
+        browser: ['Ubuntu', 'Chrome', '20.0.04'],
         syncFullHistory: false
     });
 
