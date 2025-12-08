@@ -1802,52 +1802,46 @@ async function startClient() {
         } catch (err) {
             console.error('⚠️ Chromium path error:', err.message);
         }
+    }
 
-        client.on('ready', () => {
-            console.log("✅✅✅ BOT IS READY! ✅✅✅");
-            console.log("✅ WhatsApp Connected Successfully");
-            console.log(`✅ Bot Name: ${client.info?.pushname || 'Unknown'}`);
-            qrCodeData = "";
-        });
+    client.on('ready', () => {
+        console.log("✅✅✅ BOT IS READY! ✅✅✅");
+        console.log("✅ WhatsApp Connected Successfully");
+        console.log(`✅ Bot Name: ${client.info?.pushname || 'Unknown'}`);
+        qrCodeData = "";
+    });
 
-        client.on('authenticated', () => {
-            console.log("🔐 Authentication successful - Session restored/created");
-        });
+    client.on('authenticated', () => {
+        console.log("🔐 Authentication successful - Session restored/created");
+    });
 
-        client.on('auth_failure', (msg) => {
-            console.error("❌ Authentication failed:", msg);
-        });
+    client.on('auth_failure', (msg) => {
+        console.error("❌ Authentication failed:", msg);
+    });
 
-        client.on('disconnected', (reason) => {
-            console.log("⚠️ Client disconnected:", reason);
-            console.log("⚠️ Attempting to reconnect...");
-        });
+    client.on('disconnected', (reason) => {
+        console.log("⚠️ Client disconnected:", reason);
+        console.log("⚠️ Attempting to reconnect...");
+    });
 
-        client.on('vote_update', (vote) => quizEngine.handleVote(vote));
-        client.on('message', handleMessage);
-        client.on('remote_session_saved', () => console.log('💾 Session saved to database'));
+    client.on('vote_update', (vote) => quizEngine.handleVote(vote));
+    client.on('message', handleMessage);
+    client.on('remote_session_saved', () => console.log('💾 Session saved to database'));
 
-        console.log('🔄 Initializing WhatsApp connection (this may take 30-60 seconds on first run)...');
+    console.log('🔄 Initializing WhatsApp connection (this may take 30-60 seconds on first run)...');
 
-        // Initialize with timeout for better UX
-        const initPromise = client.initialize();
-        const timeoutPromise = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('Initialization timeout after 120 seconds')), 120000)
-        );
+    // Initialize with timeout for better UX
+    const initPromise = client.initialize();
+    const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Initialization timeout after 120 seconds')), 120000)
+    );
 
-        try {
-            await Promise.race([initPromise, timeoutPromise]);
-            console.log('✅ Client initialization complete - Bot is ready!');
-        } catch (timeoutErr) {
-            console.error('❌ Initialization timeout:', timeoutErr.message);
-            throw timeoutErr;
-        }
-    } catch (err) {
-        console.error('❌ Failed to initialize WhatsApp client:', err.message);
-        if (err.message.includes('Timeout')) {
-            console.error('💡 Possible causes: Browser/Network issue, Invalid auth session');
-        }
-        throw err;
+    try {
+        await Promise.race([initPromise, timeoutPromise]);
+        console.log('✅ Client initialization complete - Bot is ready!');
+    } catch (timeoutErr) {
+        console.error('❌ Initialization timeout:', timeoutErr.message);
+        throw timeoutErr;
     }
 }
 
