@@ -34,7 +34,13 @@ export const useMongoDBAuthState = async (collection) => {
         }
     };
 
-    const creds = (await readData('creds')) || (await initAuthCreds());
+    let creds = await readData('creds');
+    if (creds) {
+        console.log("✅ [Auth] Loaded existing session credentials.");
+    } else {
+        console.log("ℹ️ [Auth] No existing session found. Creating new credentials...");
+        creds = await initAuthCreds();
+    }
 
     return {
         state: {

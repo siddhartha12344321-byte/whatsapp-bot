@@ -227,7 +227,7 @@ async function runNextQuestion(chatId) {
     // Wait for Timer
     setTimeout(async () => {
         // Calculate/Show Answer
-        const correctOpt = q.options[q.correct];
+        const correctOpt = q.options[q.correct] || "Unknown";
         await sock.sendMessage(chatId, {
             text: `⏰ Time's up!\n\n✅ Correct: *${correctOpt}*\n\n💡 ${q.explanation || ''}`
         });
@@ -305,6 +305,7 @@ async function analyzeImage(buffer, mime) {
         })
     });
     const data = await resp.json();
+    if (!resp.ok || data.error) return `Error: ${JSON.stringify(data.error || data)}`;
     return data.choices?.[0]?.message?.content || "Analysis failed";
 }
 
@@ -365,6 +366,8 @@ async function handleMessage(msg, remoteJid) {
             return;
         }
 
+        /*
+        // DISABLED: Quiz generation via chat commands
         if (text.match(/!quiz start/i) || text.match(/create quiz/i)) {
             let topic = "General Knowledge";
             const match = text.match(/on\s+([a-zA-Z0-9 ]+)/i);
@@ -379,6 +382,7 @@ async function handleMessage(msg, remoteJid) {
             }
             return;
         }
+        */
 
         if (!text) return;
 
