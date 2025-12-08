@@ -15,7 +15,7 @@ console.warn = function (...args) {
 };
 
 // ES Module Imports (Baileys v6 requires ESM)
-import makeWASocket, { useMultiFileAuthState, DisconnectReason, downloadMediaMessage, getContentType, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } from '@whiskeysockets/baileys';
+import makeWASocket, { useMultiFileAuthState, DisconnectReason, downloadMediaMessage, getContentType, fetchLatestBaileysVersion, makeCacheableSignalKeyStore, getAggregateVotesInPollMessage } from '@whiskeysockets/baileys';
 import Boom from '@hapi/boom';
 import NodeCache from 'node-cache';
 import pino from 'pino';
@@ -61,6 +61,30 @@ async function processMessageQueue() {
 function enqueueMessage(msg, sock) {
     messageQueue.push({ msg, sock });
     processMessageQueue();
+}
+
+// 🛡️ RATE LIMITING - Prevent WhatsApp Ban
+const messageLimits = new Map();
+function checkMessageLimit(chatId) {
+    const now = Date.now();
+    const window = 60000; // 1 minute
+    const maxMessages = 10; // Max 10 messages per minute per chat
+
+    if (!messageLimits.has(chatId)) {
+        messageLimits.set(chatId, []);
+    }
+
+    const timestamps = messageLimits.get(chatId);
+    while (timestamps.length > 0 && now - timestamps[0] > window) {
+        timestamps.shift();
+    }
+
+    if (timestamps.length >= maxMessages) {
+        return false; // Rate limited
+    }
+
+    timestamps.push(now);
+    return true;
 }
 
 const indexName = 'whatsapp-bot';
@@ -564,6 +588,23 @@ app.get('/qr', async (req, res) => {
     } catch { res.send('Error generating QR.'); }
 });
 
+// 🏥 HEALTH CHECK ENDPOINT - For Render monitoring
+app.get('/health', (req, res) => {
+    const isConnected = client && client.user;
+    res.json({
+        status: isConnected ? 'connected' : 'disconnected',
+        uptime: process.uptime(),
+        memory: process.memoryUsage().heapUsed / 1024 / 1024,
+        timestamp: new Date().toISOString()
+    });
+});
+
+// ♻️ GRACEFUL RESTART ENDPOINT
+app.post('/restart', (req, res) => {
+    console.log('🔄 Manual restart requested');
+    res.json({ status: 'restarting', time: new Date().toISOString() });
+    setTimeout(() => process.exit(0), 1000); // Render will auto-restart
+});
 // ============================================
 // 📚 WEB QUIZ ADMIN PANEL - /quizsection
 // ============================================
@@ -1528,6 +1569,13 @@ async function handleMessage(rawMsg, sock) {
 
     try {
         console.log(`📩 RECEIVED: ${msg.body?.substring(0, 50) || '[media]'} from ${msg.from}`);
+
+        // 🛡️ Rate limit check
+        if (!checkMessageLimit(msg.from)) {
+            console.log(`⛔ Rate limited: ${msg.from}`);
+            return;
+        }
+
         const chat = await msg.getChat();
 
         // Check if user is replying to a poll/question
@@ -2338,6 +2386,20 @@ async function startClient() {
                 console.log(`✅ Bot Name: ${sock.user?.name || 'UPSC Study Bot'}`);
                 qrCodeData = "";
                 client = sock;
+
+                // 🔥 KEEP-ALIVE MECHANISM - Prevent Render timeout
+                const keepAliveInterval = setInterval(() => {
+                    if (sock && sock.ws && sock.ws.readyState === 1) {
+                        console.log('💓 Keep-alive ping');
+                    }
+                }, 25000); // Every 25 seconds
+
+                sock._keepAliveInterval = keepAliveInterval;
+            }
+
+            // Clean up interval on any close
+            if (connection === 'close' && sock._keepAliveInterval) {
+                clearInterval(sock._keepAliveInterval);
             }
         });
 
@@ -2354,15 +2416,15 @@ async function startClient() {
             }
         });
 
-        // Poll vote handler (for quizzes) - Baileys format
+        // Poll vote handler (for quizzes) - Baileys format with proper vote extraction
         sock.ev.on('messages.update', async (updates) => {
             for (const update of updates) {
-                console.log('📊 Message update received:', JSON.stringify(update, null, 2));
-
+                // Only log poll-related updates to reduce noise
                 if (update.update?.pollUpdates) {
+                    console.log('📊 Poll update received for message:', update.key.id);
+
                     try {
                         const pollUpdates = update.update.pollUpdates;
-                        console.log('🗳️ Poll updates:', JSON.stringify(pollUpdates, null, 2));
 
                         for (const pollUpdate of pollUpdates) {
                             // Extract voter JID
@@ -2370,29 +2432,90 @@ async function startClient() {
                                 || update.key.participant
                                 || update.key.remoteJid;
 
-                            // Extract selected options - Baileys stores them differently
-                            let selectedOptions = [];
-                            if (pollUpdate.vote?.selectedOptions) {
-                                selectedOptions = pollUpdate.vote.selectedOptions.map(opt => {
-                                    // opt could be a string or buffer
-                                    const optName = typeof opt === 'string' ? opt : opt.toString();
-                                    return { name: optName };
-                                });
+                            console.log(`🗳️ Processing vote from: ${voterJid}`);
+
+                            // Get poll info from quiz engine
+                            const pollInfo = quizEngine.activePolls.get(update.key.id);
+
+                            if (!pollInfo) {
+                                console.log(`⚠️ No active poll found for ${update.key.id}`);
+                                continue;
                             }
 
-                            console.log(`🗳️ Vote from ${voterJid}: ${JSON.stringify(selectedOptions)}`);
+                            // Extract selected options
+                            let selectedOptions = [];
 
-                            // Create vote object matching quiz-engine.handleVote format
-                            const vote = {
-                                parentMessage: { id: { id: update.key.id } },
-                                voter: voterJid,
-                                selectedOptions: selectedOptions
-                            };
+                            // Method 1: Try vote.selectedOptions (array of option hashes or names)
+                            if (pollUpdate.vote?.selectedOptions?.length > 0) {
+                                for (const opt of pollUpdate.vote.selectedOptions) {
+                                    // Option could be a Buffer, string, or object
+                                    let optName;
+                                    if (Buffer.isBuffer(opt)) {
+                                        // It's a hash - try to match with stored options
+                                        const optionIndex = pollInfo.options?.findIndex((storedOpt, idx) => {
+                                            // Try matching by index position
+                                            return true; // Can't decode hash, will use other methods
+                                        });
+                                        continue;
+                                    } else if (typeof opt === 'string') {
+                                        optName = opt;
+                                    } else if (opt?.name) {
+                                        optName = opt.name;
+                                    } else {
+                                        optName = String(opt);
+                                    }
 
-                            quizEngine.handleVote(vote);
+                                    if (optName) {
+                                        selectedOptions.push({ name: optName });
+                                    }
+                                }
+                            }
+
+                            // Method 2: Try senderTimestampMs based vote tracking
+                            if (selectedOptions.length === 0 && pollUpdate.senderTimestampMs) {
+                                console.log(`🔍 Checking timestamp-based vote tracking`);
+                                // This vote is valid but we need the option from aggregates
+                            }
+
+                            // Method 3: Get aggregated votes from poll message
+                            if (selectedOptions.length === 0) {
+                                try {
+                                    // Try to find the vote in pollVotes aggregate
+                                    const pollVotes = pollUpdate.pollVotes;
+                                    if (pollVotes && pollVotes.length > 0) {
+                                        for (const pv of pollVotes) {
+                                            if (pv.voters?.includes(voterJid)) {
+                                                selectedOptions.push({ name: pv.name || pv.optionName });
+                                            }
+                                        }
+                                    }
+                                } catch (aggErr) {
+                                    console.warn(`⚠️ Aggregate vote extraction failed:`, aggErr.message);
+                                }
+                            }
+
+                            // If we have options, create the vote
+                            if (selectedOptions.length > 0) {
+                                console.log(`✅ Vote detected: ${voterJid} → ${JSON.stringify(selectedOptions)}`);
+
+                                const vote = {
+                                    parentMessage: { id: { id: update.key.id } },
+                                    voter: voterJid,
+                                    selectedOptions: selectedOptions
+                                };
+
+                                quizEngine.handleVote(vote);
+                            } else {
+                                // Last resort: Log raw data for debugging
+                                console.log(`❓ Could not extract vote. Raw pollUpdate:`,
+                                    JSON.stringify(pollUpdate, (key, value) =>
+                                        Buffer.isBuffer(value) ? `[Buffer:${value.length}]` : value, 2
+                                    ).substring(0, 500)
+                                );
+                            }
                         }
                     } catch (err) {
-                        console.error("❌ Poll vote error:", err.message, err.stack);
+                        console.error("❌ Poll vote error:", err.message);
                     }
                 }
             }

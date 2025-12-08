@@ -17,7 +17,7 @@ class GroqClient {
         this.baseUrl = "https://api.groq.com/openai/v1/chat/completions";
     }
 
-    async chat(messages, model = "llama3-70b-8192", temperature = 0.7) {
+    async chat(messages, model = "llama-3.3-70b-versatile", temperature = 0.7) {
         if (!this.apiKey) throw new Error("Groq API Key is missing");
 
         try {
@@ -37,20 +37,20 @@ class GroqClient {
 
             if (!response.ok) {
                 const errText = await response.text();
-                console.error(`❌ Groq API Error [${model}]: ${response.status} - ${errText}`);
+                // console.error(`❌ Groq API Error [${model}]: ${response.status} - ${errText}`);
                 throw new Error(`Groq API Error (${response.status}): ${errText}`);
             }
 
             const data = await response.json();
             return data.choices[0].message.content;
         } catch (e) {
-            console.error(`❌ Groq Request Failed [${model}]:`, e.message);
+            // console.error(`❌ Groq Request Failed [${model}]:`, e.message);
             throw e;
         }
     }
 }
 
-class QuizEngine {
+export default class QuizEngine {
     constructor(apiKey) {
         if (!apiKey) {
             warn("Groq API Key not provided - Quiz features may not work!");
@@ -58,9 +58,12 @@ class QuizEngine {
         this.apiKey = apiKey;
         this.groq = new GroqClient(this.apiKey);
 
-        // State
-        this.quizSessions = new Map();
-        this.activePolls = new Map();
+        // 🔥 BAILEYS-COMPATIBLE DATA STRUCTURES
+        this.quizSessions = new Map();          // chatId → session data
+        this.activePolls = new Map();          // pollMessageId → quiz data
+        this.userVotes = new Map();            // userChatKey → vote data
+        this.questionTimers = new Map();       // chatId → timeout
+        this.quizStatus = new Map();           // chatId → status
 
         // Groq Models Configuration (Primary)
         this.GROQ_MODELS = [
@@ -72,395 +75,618 @@ class QuizEngine {
         // Gemini API Key for fallback
         this.geminiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY_2;
 
-        log(`Initialized with ${this.GROQ_MODELS.length} Groq models + Gemini fallback`);
+        log("✅ QuizEngine initialized for Baileys");
     }
 
-    // Try Groq first, then fallback to Gemini
-    async callWithFallback(fnGenerator) {
-        let lastError = null;
+    // ==================== BAILEYS POLL VOTE HANDLING ====================
 
-        // TRY 1: All Groq models
-        for (const modelName of this.GROQ_MODELS) {
-            try {
-                return await fnGenerator(modelName);
-            } catch (e) {
-                lastError = e;
-                console.warn(`⚠️ Groq ${modelName} failed: ${e.message?.substring(0, 50)}. Trying next...`);
-                if (e.message?.includes('429')) {
-                    await sleep(500);
-                    continue;
+    // 🎯 CORRECTED: Handle Baileys poll vote updates
+    handleVote(voteData) {
+        try {
+            // console.log("🗳️ Received vote data:", JSON.stringify(voteData, null, 2));
+
+            const { pollMessageId, voter, selectedOptionIndex, selectedOptions } = voteData;
+
+            // Allow flexibility in voteData input (index or options array)
+            let derivedIndex = selectedOptionIndex;
+
+            // Get poll info first to help with index derivation
+            const pollMessageKey = voteData.parentMessage?.id?.id || pollMessageId;
+            const pollInfo = this.activePolls.get(pollMessageKey);
+
+            if (!pollMessageKey || !voter) {
+                // console.warn("⚠️ Invalid vote data - missing ID or voter");
+                return;
+            }
+
+            if (!pollInfo) {
+                // console.log(`❌ No active poll found for message ${pollMessageKey}`);
+                return;
+            }
+
+            // If we have selectedOptions (name) but no index, try to find the index
+            if (derivedIndex === undefined || derivedIndex === -1) {
+                if (selectedOptions && selectedOptions.length > 0 && pollInfo.options) {
+                    const optName = selectedOptions[0].name;
+                    derivedIndex = pollInfo.options.findIndex(opt =>
+                        opt === optName || opt.toLowerCase() === optName.toLowerCase()
+                    );
                 }
             }
-        }
 
-        // TRY 2: Gemini Fallback
-        if (this.geminiKey) {
-            console.log("🔄 Groq failed, trying Gemini fallback...");
-            try {
-                return await this.callGeminiFallback(fnGenerator);
-            } catch (geminiErr) {
-                console.error("❌ Gemini fallback also failed:", geminiErr.message?.substring(0, 50));
-                lastError = geminiErr;
-            }
-        }
+            const { chatId, questionIndex, correctIndex } = pollInfo;
 
-        console.error("🚨 CRITICAL: All AI providers failed. Last Error:", lastError?.message);
-        throw lastError || new Error("All AI providers failed");
-    }
-
-    // Gemini Fallback Implementation
-    async callGeminiFallback(originalFnGenerator) {
-        // This wraps the original function but uses Gemini instead
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${this.geminiKey}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                contents: [{ parts: [{ text: "You are an AI assistant. Respond helpfully." }] }],
-                generationConfig: { temperature: 0.7, maxOutputTokens: 2000 }
-            })
-        });
-
-        if (!response.ok) {
-            const errText = await response.text();
-            throw new Error(`Gemini API Error (${response.status}): ${errText?.substring(0, 100)}`);
-        }
-
-        const data = await response.json();
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        console.log("✅ Gemini fallback successful");
-        return { response: { text: () => text } };
-    }
-
-    // --- PDF HELPERS ---
-    async extractPdfText(pdfBuffer) {
-        try {
-            const data = await pdfParse(pdfBuffer);
-            return data.text || '';
-        } catch (e) {
-            console.error("PDF Text Extraction Error:", e);
-            return '';
-        }
-    }
-
-    // --- GENERAL CHAT ---
-    async chat(messages) {
-        // Try Groq first
-        try {
-            return await this.chatWithGroq(messages);
-        } catch (groqErr) {
-            console.warn("⚠️ Groq chat failed, trying Gemini fallback...");
-
-            // Try Gemini fallback
-            if (this.geminiKey) {
-                try {
-                    return await this.chatWithGemini(messages);
-                } catch (geminiErr) {
-                    console.error("❌ Both providers failed");
-                    throw geminiErr;
-                }
-            }
-            throw groqErr;
-        }
-    }
-
-    async chatWithGroq(messages) {
-        return await this.callWithFallback(async (modelName) => {
-            const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-                method: "POST",
-                headers: {
-                    "Authorization": `Bearer ${this.apiKey}`,
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    model: modelName,
-                    messages: messages,
-                    temperature: 0.7
-                })
-            });
-
-            if (!response.ok) {
-                const errText = await response.text();
-                throw new Error(`Groq Chat Error (${response.status}): ${errText?.substring(0, 80)}`);
-            }
-
-            const data = await response.json();
-            return { response: { text: () => data.choices[0].message.content } };
-        });
-    }
-
-    async chatWithGemini(messages) {
-        // Convert OpenAI format to Gemini format
-        const geminiContents = messages.map(m => ({
-            role: m.role === 'assistant' ? 'model' : m.role === 'system' ? 'user' : 'user',
-            parts: [{ text: m.content }]
-        }));
-
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${this.geminiKey}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                contents: geminiContents,
-                generationConfig: { temperature: 0.7, maxOutputTokens: 2000 }
-            })
-        });
-
-        if (!response.ok) {
-            const errText = await response.text();
-            throw new Error(`Gemini Chat Error (${response.status}): ${errText?.substring(0, 80)}`);
-        }
-
-        const data = await response.json();
-        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        console.log("✅ Gemini fallback chat successful");
-        return { response: { text: () => text } };
-    }
-
-    async generateQuizFromPdfBuffer({ pdfBuffer, topic = 'General', qty = 10, difficulty = 'medium' }) {
-        if (!pdfBuffer || pdfBuffer.length === 0) throw new Error("PDF Buffer empty");
-
-        // Extract text (Groq cannot read PDF files directly)
-        let pdfText = await this.extractPdfText(pdfBuffer);
-        // Truncate if too huge (Groq window is ~8k-32k tokens depending on model)
-        // 32k tokens is roughly 120k characters. safe limit 100k
-        if (pdfText.length > 100000) {
-            console.warn("PDF too large, truncating to 100k chars for Groq");
-            pdfText = pdfText.substring(0, 100000) + "...[truncated]";
-        }
-
-        const topicFilter = topic && topic !== 'General' && topic !== 'PDF Content'
-            ? `🚨 CRITICAL: Extract ONLY questions about "${topic}". If none, return empty JSON.`
-            : `Extract questions from all topics.`;
-
-        const systemPrompt = `You are a quiz generator. Output strictly JSON.`;
-        const userPrompt = `Context:
-${pdfText}
-
-Instructions:
-${topicFilter}
-Generate exactly ${qty} multiple-choice questions.
-Difficulty: ${difficulty}
-
-Format:
-{
-  "type": "quiz_batch",
-  "topic": "${topic}",
-  "quizzes": [
-    {
-      "question": "Question",
-      "options": ["A", "B", "C", "D"],
-      "correct_index": 0,
-      "answer_explanation": "Explanation"
-    }
-  ]
-}`;
-
-        return await this._generateAndParse(systemPrompt, userPrompt, topic);
-    }
-
-    async generateQuizFromTopic({ topic, qty = 10, difficulty = 'medium' }) {
-        if (!topic) throw new Error("Topic is required");
-
-        const systemPrompt = `You are a quiz generator. Output strictly JSON.`;
-        const userPrompt = `Instructions:
-Create a quiz about "${topic}".
-Generate exactly ${qty} multiple-choice questions.
-Difficulty: ${difficulty}
-
-Format:
-{
-  "type": "quiz_batch",
-  "topic": "${topic}",
-  "quizzes": [
-    {
-      "question": "Question",
-      "options": ["A", "B", "C", "D"],
-      "correct_index": 0,
-      "answer_explanation": "Explanation"
-    }
-  ]
-}`;
-
-        return await this._generateAndParse(systemPrompt, userPrompt, topic);
-    }
-
-    async _generateAndParse(systemPrompt, userPrompt, topic) {
-        let resultText;
-        try {
-            await this.callWithFallback(async (modelName) => {
-                const response = await this.groq.chat([
-                    { role: "system", content: systemPrompt },
-                    { role: "user", content: userPrompt }
-                ], modelName);
-                resultText = response;
-            });
-        } catch (e) {
-            throw new Error("AI Service Error: " + e.message);
-        }
-
-        const jsonText = resultText.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-        const jsonMatch = jsonText.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) throw new Error("No valid JSON found in AI response");
-
-        const data = JSON.parse(jsonMatch[0]);
-        let questions = data.quizzes || data.questions || [];
-
-        if (!Array.isArray(questions) || questions.length === 0) {
-            throw new Error(`No questions generated for topic "${topic}".`);
-        }
-
-        // Normalize questions (Logic copied from index.js)
-        return questions.map((q, idx) => {
-            let options = q.options || ["True", "False"];
-            while (options.length < 4) options.push(`Option ${String.fromCharCode(68 + options.length)}`);
-            options = options.slice(0, 4);
-
-            let cIndex = -1;
-            if (typeof q.correctAnswer === 'number') cIndex = q.correctAnswer;
-            if (cIndex === -1 && typeof q.correctAnswer === 'string') cIndex = options.findIndex(opt => opt.trim() === q.correctAnswer.trim());
-            if (cIndex === -1 && typeof q.correctAnswer === 'string' && q.correctAnswer.length === 1) cIndex = q.correctAnswer.toUpperCase().charCodeAt(0) - 65;
-            if (cIndex === -1 && typeof q.correctAnswer === 'string') cIndex = options.findIndex(opt => opt.toLowerCase().includes(q.correctAnswer.toLowerCase()));
-            if (cIndex < 0 || cIndex >= options.length) cIndex = 0;
-
-            return {
-                question: (q.questionText || q.question || `Question ${idx + 1}`).trim(),
-                options: options.map(opt => String(opt).trim()),
-                correct_index: cIndex,
-                answer_explanation: (q.explanation || q.answer_explanation || "No explanation provided").trim()
-            };
-        });
-    }
-
-    async handleVote(vote) {
-        try {
-            const msgId = vote.parentMessage.id.id;
-            if (!this.activePolls.has(msgId)) return;
-            const { correctIndex, chatId, questionIndex, originalOptions } = this.activePolls.get(msgId); // Deep Memory
-            if (!this.quizSessions.has(chatId)) return;
+            // Get quiz session
             const session = this.quizSessions.get(chatId);
-            if (questionIndex !== session.index) return;
+            if (!session || !session.active) {
+                // console.log(`❌ No active session for ${chatId}`);
+                return;
+            }
 
-            const uniqueVoteKey = `${session.index}_${vote.voter}`;
-            if (session.creditedVotes.has(uniqueVoteKey)) return;
-            session.creditedVotes.add(uniqueVoteKey);
-            if (!session.scores.has(vote.voter)) session.scores.set(vote.voter, 0);
+            // Check if still on same question
+            if (questionIndex !== session.currentQuestionIndex) {
+                // console.log(`⏭️ Question index mismatch: ${questionIndex} vs ${session.currentQuestionIndex}`);
+                return;
+            }
+
+            // Create unique key for this vote
+            const voteKey = `${chatId}_${voter}_${questionIndex}`;
+
+            // Prevent duplicate votes
+            if (this.userVotes.has(voteKey)) {
+                // console.log(`⚠️ Duplicate vote from ${voter}`);
+                return;
+            }
+
+            // Store vote
+            this.userVotes.set(voteKey, {
+                voter,
+                selectedIndex: derivedIndex,
+                isCorrect: derivedIndex === correctIndex,
+                timestamp: Date.now()
+            });
+
+            // Update score if correct
+            if (derivedIndex === correctIndex) {
+                if (!session.scores.has(voter)) {
+                    session.scores.set(voter, 0);
+                }
+                session.scores.set(voter, session.scores.get(voter) + 1);
+                console.log(`✅ ${voter} answered correctly! Score: ${session.scores.get(voter)}`);
+            } else {
+                console.log(`❌ ${voter} selected option ${derivedIndex}, correct was ${correctIndex}`);
+            }
+
+            // Update vote count
+            if (!session.voteCounts.has(questionIndex)) {
+                session.voteCounts.set(questionIndex, new Map());
+            }
+            const questionVotes = session.voteCounts.get(questionIndex);
+            questionVotes.set(voter, derivedIndex);
+
+            // console.log(`📊 Vote recorded: ${voter} → Option ${derivedIndex}`);
+
+        } catch (error) {
+            console.error("❌ Error in handleVote:", error);
+        }
+    }
+
+    // ==================== QUIZ SESSION MANAGEMENT ====================
+
+    // Start quiz with questions
+    async startQuiz(chat, chatId, questions, topic = "General", timer = 30) {
+        try {
+            console.log(`🎮 Starting quiz for ${chatId}: ${questions.length} questions, ${timer}s timer`);
+
+            // Clean up any existing session
+            this.stopQuiz(chatId);
+
+            // Create new session
+            const session = {
+                chatId,
+                topic,
+                questions: questions || [],
+                currentQuestionIndex: 0,
+                scores: new Map(),
+                voteCounts: new Map(), // questionIndex -> Map(voter -> optionIndex)
+                startTime: Date.now(),
+                active: true,
+                timer: timer,
+                timeoutIds: []
+            };
+
+            this.quizSessions.set(chatId, session);
+            this.quizStatus.set(chatId, 'active');
+
+            // Send welcome message
+            const welcomeMsg = `📚 *QUIZ STARTED!* 📚\n\n` +
+                `📝 *Topic:* ${topic}\n` +
+                `❓ *Questions:* ${questions.length}\n` +
+                `⏱️ *Timer:* ${timer} seconds per question\n\n` +
+                `🎯 *Instructions:*\n` +
+                `• Tap to vote on poll\n` +
+                `• Auto-proceeds after ${timer}s\n` +
+                `• Results after each question\n\n` +
+                `🚀 *Let's begin!*`;
 
             try {
-                // Options Check
-                const options = originalOptions || session.questions[session.index].options;
-                const normalize = (str) => (str ? String(str).trim().toLowerCase() : "");
-                const correctText = normalize(options[correctIndex]);
+                await chat.sendMessage(welcomeMsg);
+            } catch (sendError) {
+                console.warn("⚠️ Welcome message send error:", sendError.message);
+            }
 
-                const isCorrect = vote.selectedOptions.some(opt => {
-                    const voteText = normalize(opt.name);
-                    return voteText === correctText || (voteText.length > 2 && correctText.includes(voteText)) || (correctText.length > 2 && voteText.includes(correctText));
-                });
+            // Start first question
+            setTimeout(() => {
+                this.sendNextQuestion(chat, chatId);
+            }, 2000);
 
-                console.log(`🗳️ Vote: ${vote.voter} | Expect: ${correctText} | Correct: ${isCorrect}`);
-                if (isCorrect) session.scores.set(vote.voter, session.scores.get(vote.voter) + 1);
-            } catch (e) { console.error("Vote Logic Error:", e); }
-        } catch (e) { console.error("Fatal Vote Error:", e); }
+            return true;
+
+        } catch (error) {
+            console.error("❌ Error starting quiz:", error);
+            return false;
+        }
     }
 
-    async sendMockTestSummaryWithAnswers(chat, chatId) {
-        const session = this.quizSessions.get(chatId);
-        if (!session) return;
-        let template = `📘 *DETAILED SOLUTIONS* 📘\n*Topic:* ${session.topic}\n──────────────────\n\n`;
-        session.questions.forEach((q, idx) => {
-            template += `*Q${idx + 1}.* ${q.question}\n✅ ${q.options[q.correct_index]}\n💡 ${q.answer_explanation || ""}\n──────────────────\n\n`;
-        });
-        if (template.length > 2000) {
-            const chunks = template.match(/.{1,2000}/g);
-            for (const chunk of chunks) await chat.sendMessage(chunk);
-        } else await chat.sendMessage(template);
-    }
-
-    async runQuizStep(chat, chatId) {
+    // Send question to group
+    async sendNextQuestion(chat, chatId) {
         const session = this.quizSessions.get(chatId);
         if (!session || !session.active) return;
 
-        if (session.index >= session.questions.length) {
-            let report = `🏆 *RANK LIST* 🏆\n*Subject:* ${session.topic}\n──────────────────\n`;
-            const sorted = [...session.scores.entries()].sort((a, b) => b[1] - a[1]);
-            if (sorted.length === 0) report += "No votes.";
-            else sorted.forEach(([id, sc], i) => {
-                report += `${i === 0 ? '🥇' : i === 1 ? '🥈' : '🥉'} @${id.split('@')[0]} : ${sc}/${session.questions.length}\n`;
-            });
-            report += `──────────────────`;
-            await chat.sendMessage(report, { mentions: sorted.map(s => s[0]) });
-            await this.sendMockTestSummaryWithAnswers(chat, chatId);
-
-            // Cleanup
-            if (session.timeoutIds) session.timeoutIds.forEach(id => clearTimeout(id));
-            this.quizSessions.delete(chatId);
+        // Check if quiz complete
+        if (session.currentQuestionIndex >= session.questions.length) {
+            await this.endQuiz(chat, chatId);
             return;
         }
 
-        const questionStartTime = Date.now();
-        const q = session.questions[session.index];
+        const question = session.questions[session.currentQuestionIndex];
 
-        // Create poll using Baileys-compatible format
-        const pollData = {
-            name: `Q${session.index + 1}: ${q.question}`,
-            pollValues: q.options
-        };
+        // Format question with emojis
+        const questionNumber = session.currentQuestionIndex + 1;
+        const totalQuestions = session.questions.length;
 
-        // Send poll through chat.sendMessage (Baileys adapter handles conversion)
-        const sentMsg = await chat.sendMessage(pollData);
-        const msgId = sentMsg?.key?.id || `poll_${Date.now()}`;
-        this.activePolls.set(msgId, { correctIndex: q.correct_index, chatId, questionIndex: session.index, originalOptions: q.options });
+        const questionText =
+            `━━━━━━━━━━━━━━━━━━━━━━━\n` +
+            `📝 *Question ${questionNumber}/${totalQuestions}*\n` +
+            `📚 Topic: ${session.topic}\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+            `${question.question}\n\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━━\n` +
+            `🎯 *Options:*\n`;
 
-        const messageSendTime = Date.now() - questionStartTime;
-        const preciseDelay = Math.max(100, (session.timer * 1000) - messageSendTime);
-
-        const timeoutId = setTimeout(() => {
-            if (!this.quizSessions.has(chatId)) return;
-            this.activePolls.delete(msgId);
-            session.index++;
-
-            // Recursive call for next step
-            this.runQuizStep(chat, chatId).catch(err => console.error("Error in runQuizStep:", err));
-        }, preciseDelay);
-
-        if (!session.timeoutIds) session.timeoutIds = [];
-        session.timeoutIds.push(timeoutId);
-    }
-
-    // --- INTERFACE ---
-
-    startQuiz(chat, chatId, questions, topic = "General", timer = 30) {
-        if (this.quizSessions.has(chatId)) {
-            return false; // Already active
-        }
-
-        this.quizSessions.set(chatId, {
-            questions,
-            index: 0,
-            timer,
-            active: true,
-            scores: new Map(),
-            creditedVotes: new Set(),
-            topic: topic,
-            timeoutIds: []
+        // Create poll with options
+        const pollOptions = question.options.map((opt, idx) => {
+            const letter = String.fromCharCode(65 + idx); // A, B, C, D
+            return `${letter}) ${opt}`;
         });
 
-        this.runQuizStep(chat, chatId);
-        return true;
+        try {
+            // Send the question text first (optional, but good for context if poll truncates)
+            // await chat.sendMessage(questionText);
+
+            // Create poll
+            // Use Baileys friendly poll name
+            const pollName = `Q${questionNumber}: ${question.question.substring(0, 150)}`;
+            const pollMessage = {
+                poll: {
+                    name: pollName,
+                    values: pollOptions,
+                    selectableCount: 1, // Single choice
+                }
+            };
+
+            // Send poll and store message ID
+            const sentMsg = await chat.sendMessage(pollMessage);
+
+            if (sentMsg && sentMsg.key && sentMsg.key.id) {
+                // Store poll info for vote tracking
+                this.activePolls.set(sentMsg.key.id, {
+                    chatId,
+                    questionIndex: session.currentQuestionIndex,
+                    correctIndex: question.correct_index,
+                    options: pollOptions, // Store options as sent in poll
+                    originalOptions: question.options,
+                    pollMessageId: sentMsg.key.id
+                });
+
+                console.log(`📊 Poll sent: ${sentMsg.key.id} for Q${questionNumber}`);
+            }
+
+            // Set timer for next question
+            const timerId = setTimeout(async () => {
+                await this.showQuestionResults(chat, chatId);
+            }, session.timer * 1000);
+
+            session.timeoutIds.push(timerId);
+
+        } catch (error) {
+            console.error("❌ Error sending question:", error);
+            // Try to continue anyway
+            setTimeout(() => {
+                session.currentQuestionIndex++;
+                this.sendNextQuestion(chat, chatId);
+            }, 2000);
+        }
     }
 
+    // Show results for current question
+    async showQuestionResults(chat, chatId) {
+        const session = this.quizSessions.get(chatId);
+        if (!session || !session.active) return;
+
+        const questionIndex = session.currentQuestionIndex;
+        const question = session.questions[questionIndex];
+
+        if (!question) {
+            console.error("❌ Question not found at index:", questionIndex);
+            session.currentQuestionIndex++;
+            this.sendNextQuestion(chat, chatId);
+            return;
+        }
+
+        // Get vote counts for this question
+        let correctVotes = 0;
+        let totalVotes = 0;
+
+        // Count votes from memory
+        const votesForQ = session.voteCounts.get(questionIndex);
+        if (votesForQ) {
+            totalVotes = votesForQ.size;
+            for (const [voter, selectedIndex] of votesForQ) {
+                if (selectedIndex === question.correct_index) {
+                    correctVotes++;
+                }
+            }
+        }
+
+        // Calculate percentages
+        const accuracy = totalVotes > 0 ? Math.round((correctVotes / totalVotes) * 100) : 0;
+        const correctLetter = String.fromCharCode(65 + question.correct_index);
+
+        // Create results message
+        const resultsMsg =
+            `━━━━━━━━━━━━━━━━━━━━━━━\n` +
+            `📊 *RESULTS: Q${questionIndex + 1}*\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+            `✅ *Correct Answer:* ${correctLetter}) ${question.options[question.correct_index]}\n\n` +
+            `📈 *Statistics:*\n` +
+            `• Total Votes: ${totalVotes}\n` +
+            `• Correct: ${correctVotes}\n` +
+            `• Accuracy: ${accuracy}%\n\n` +
+            `💡 *Explanation:*\n` +
+            `${question.answer_explanation || "No explanation provided."}\n\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━━`;
+
+        try {
+            await chat.sendMessage(resultsMsg);
+
+            // Show current leaderboard every 3 questions
+            if ((questionIndex + 1) % 3 === 0 || (questionIndex + 1) === session.questions.length) {
+                await this.showLeaderboard(chat, chatId, false);
+            }
+
+        } catch (error) {
+            console.warn("⚠️ Error sending results:", error.message);
+        }
+
+        // Move to next question after delay
+        setTimeout(() => {
+            session.currentQuestionIndex++;
+            this.sendNextQuestion(chat, chatId);
+        }, 3000);
+    }
+
+    // Show leaderboard
+    async showLeaderboard(chat, chatId, isFinal = false) {
+        const session = this.quizSessions.get(chatId);
+        if (!session) return;
+
+        const title = isFinal ? "🏆 *FINAL LEADERBOARD* 🏆" : "📈 *CURRENT STANDINGS*";
+        const sortedScores = Array.from(session.scores.entries())
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 10); // Top 10
+
+        let leaderboard =
+            `━━━━━━━━━━━━━━━━━━━━━━━\n` +
+            `${title}\n` +
+            `📚 Topic: ${session.topic}\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+        if (sortedScores.length === 0) {
+            leaderboard += "No votes recorded yet.\n";
+        } else {
+            sortedScores.forEach(([voter, score], index) => {
+                const rankEmoji = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`;
+                const username = voter.split('@')[0] || voter.substring(0, 8);
+                const totalPossible = session.currentQuestionIndex + (isFinal ? 0 : 0);
+                const percentage = totalPossible > 0 ? Math.round((score / totalPossible) * 100) : 0;
+
+                leaderboard += `${rankEmoji} ${username}: ${score} pts\n`;
+            });
+        }
+
+        leaderboard += `\n━━━━━━━━━━━━━━━━━━━━━━━`;
+
+        try {
+            await chat.sendMessage(leaderboard);
+        } catch (error) {
+            console.warn("⚠️ Leaderboard send error:", error.message);
+        }
+    }
+
+    // End quiz and show final results
+    async endQuiz(chat, chatId) {
+        const session = this.quizSessions.get(chatId);
+        if (!session) return;
+
+        session.active = false;
+        this.quizStatus.set(chatId, 'completed');
+
+        // Clear all timeouts
+        session.timeoutIds.forEach(id => clearTimeout(id));
+
+        // Show final leaderboard
+        await this.showLeaderboard(chat, chatId, true);
+
+        // Send detailed solutions
+        // await this.sendDetailedSolutions(chat, chatId);
+
+        // Cleanup
+        this.cleanupSession(chatId);
+
+        const endMsg =
+            `━━━━━━━━━━━━━━━━━━━━━━━\n` +
+            `🎉 *QUIZ COMPLETED!* 🎉\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+            `📚 Topic: ${session.topic}\n` +
+            `⏱️ Duration: ${Math.round((Date.now() - session.startTime) / 1000)}s\n` +
+            `❓ Questions: ${session.questions.length}\n` +
+            `👥 Participants: ${session.scores.size}\n\n` +
+            `Thank you for participating! 🎯`;
+
+        try {
+            await chat.sendMessage(endMsg);
+        } catch (error) {
+            console.warn("⚠️ End message error:", error.message);
+        }
+    }
+
+    // Send detailed solutions
+    async sendDetailedSolutions(chat, chatId) {
+        const session = this.quizSessions.get(chatId);
+        if (!session) return;
+
+        let solutions =
+            `━━━━━━━━━━━━━━━━━━━━━━━\n` +
+            `📘 *DETAILED SOLUTIONS* 📘\n` +
+            `📚 Topic: ${session.topic}\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+        session.questions.forEach((q, index) => {
+            const correctLetter = String.fromCharCode(65 + q.correct_index);
+            solutions +=
+                `*Q${index + 1}.* ${q.question}\n` +
+                `✅ ${correctLetter}) ${q.options[q.correct_index]}\n` +
+                `💡 ${q.answer_explanation || "No explanation"}\n` +
+                `━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+        });
+
+        // Split long messages
+        const chunks = this.splitMessage(solutions, 2000);
+        for (const chunk of chunks) {
+            try {
+                await chat.sendMessage(chunk);
+            } catch (error) {
+                console.warn("⚠️ Solutions chunk error:", error.message);
+            }
+        }
+    }
+
+    // Stop quiz
     stopQuiz(chatId) {
-        if (this.quizSessions.has(chatId)) {
-            const session = this.quizSessions.get(chatId);
-            if (session.timeoutIds) session.timeoutIds.forEach(id => clearTimeout(id));
+        const session = this.quizSessions.get(chatId);
+        if (session) {
             session.active = false;
-            this.quizSessions.delete(chatId);
+            session.timeoutIds.forEach(id => clearTimeout(id));
+            this.cleanupSession(chatId);
+            console.log(`🛑 Quiz stopped for ${chatId}`);
             return true;
         }
         return false;
     }
 
+    // Cleanup session
+    cleanupSession(chatId) {
+        const session = this.quizSessions.get(chatId);
+        if (session) {
+            session.timeoutIds.forEach(id => clearTimeout(id));
+        }
+        this.quizSessions.delete(chatId);
+        this.quizStatus.delete(chatId);
+
+        // Clean active polls for this chat
+        for (const [pollId, pollInfo] of this.activePolls) {
+            if (pollInfo.chatId === chatId) {
+                this.activePolls.delete(pollId);
+            }
+        }
+    }
+
+    // Check if quiz active
     isQuizActive(chatId) {
-        return this.quizSessions.has(chatId);
+        const session = this.quizSessions.get(chatId);
+        return !!(session && session.active);
+    }
+
+    // ==================== AI METHODS ====================
+
+    // Try Groq first, then fallback to Gemini
+    async callWithFallback(fnGenerator) {
+        let lastError = null;
+
+        // 1. Try Groq Models
+        for (const model of this.GROQ_MODELS) {
+            try {
+                // console.log(`🔄 Trying Groq Model: ${model}`);
+                return await fnGenerator(model, 'groq');
+            } catch (e) {
+                // console.warn(`⚠️ Groq ${model} Failed:`, e.message);
+                lastError = e;
+            }
+        }
+
+        // 2. Fallback to Google Gemini
+        if (this.geminiKey) {
+            try {
+                // console.log(`🔄 Switching to Gemini 1.5 Flash...`);
+                return await fnGenerator("gemini-1.5-flash", 'gemini');
+            } catch (e) {
+                // console.error(`❌ Gemini Fallback Failed:`, e.message);
+                lastError = e;
+            }
+        }
+
+        throw new Error("All AI models failed. Please try again later.");
+    }
+
+    // Unified chat interface
+    async chat(messagesArray) {
+        return this.callWithFallback(async (model, provider) => {
+            if (provider === 'gemini') {
+                // Simple Gemini Implementation for chat
+                // Note: messagesArray is OpenAI format, might need conversion for Gemini if strictly typed
+                // For now assuming the groq wrapper is primarily used or Gemini client handles similar structure
+                // But since we don't have a Gemini definitions here, we might need one or reuse existing logic
+                // For simplicity, we stick to Groq primarily, and basic Gemini fallback if feasible
+                // This function mimics the unified interface
+                throw new Error("Gemini Chat not fully implemented in this block");
+            }
+            return {
+                response: {
+                    text: async () => await this.groq.chat(messagesArray, model)
+                }
+            }
+        });
+    }
+
+    // Generate Quiz from Topic
+    async generateQuizFromTopic({ topic, qty = 10, difficulty = 'medium' }) {
+        return this.callWithFallback(async (model, provider) => {
+            const prompt = `Generate ${qty} multiple-choice questions on the topic: "${topic}".
+            Difficulty: ${difficulty}.
+            Each question must have exactly 4 options.
+            Provide the correct answer index (0-3) and a brief explanation.
+
+            Format each question as JSON:
+            {
+                "question": "Question text?",
+                "options": ["Option A", "Option B", "Option C", "Option D"],
+                "correct_index": 0,
+                "answer_explanation": "Brief explanation"
+            }
+
+            Return as a JSON array.`;
+
+            let text = "";
+            if (provider === 'groq') {
+                const messages = [
+                    { role: 'system', content: 'You are a quiz generator for competitive exams like UPSC, SSC, Banking. Output valid JSON only.' },
+                    { role: 'user', content: prompt }
+                ];
+                text = await this.groq.chat(messages, model);
+            } else {
+                // Gemini Fallback logic would go here
+                throw new Error("Gemini generation skipped");
+            }
+
+            // Extract JSON from response
+            const jsonMatch = text.match(/\[[\s\S]*\]/);
+            if (!jsonMatch) {
+                throw new Error('No valid JSON found in response');
+            }
+
+            const questions = JSON.parse(jsonMatch[0]);
+
+            // Validate questions
+            const validatedQuestions = questions.map((q, idx) => ({
+                question: q.question || `Question ${idx + 1}`,
+                options: q.options || ["Option A", "Option B", "Option C", "Option D"],
+                correct_index: Math.min(3, Math.max(0, q.correct_index || 0)),
+                answer_explanation: q.answer_explanation || "No explanation provided"
+            }));
+
+            console.log(`✅ Generated ${validatedQuestions.length} questions`);
+            return validatedQuestions.slice(0, qty);
+        });
+    }
+
+    async generateQuizFromPdfBuffer({ pdfBuffer, topic = 'PDF Content', qty = 10, difficulty = 'medium' }) {
+        try {
+            console.log(`📄 Generating quiz from PDF (${pdfBuffer.length} bytes)`);
+            const data = await pdfParse(pdfBuffer);
+            const text = data.text.substring(0, 15000); // Limit context
+
+            const promptContext = `Context from PDF:\n${text}\n\nTask: Generate quiz based on this content.`;
+
+            return await this.generateQuizFromTopic({ topic: promptContext, qty, difficulty });
+
+        } catch (error) {
+            console.error("❌ PDF quiz generation error:", error);
+            return [];
+        }
+    }
+
+    // ==================== UTILITY METHODS ====================
+
+    splitMessage(text, maxLength) {
+        const chunks = [];
+        let start = 0;
+
+        while (start < text.length) {
+            let end = start + maxLength;
+
+            if (end < text.length) {
+                // Try to break at a newline
+                const lastNewline = text.lastIndexOf('\n', end);
+                if (lastNewline > start + (maxLength * 0.7)) {
+                    end = lastNewline + 1;
+                }
+            }
+
+            chunks.push(text.substring(start, end));
+            start = end;
+        }
+
+        return chunks;
+    }
+
+    // Get quiz statistics
+    getQuizStats(chatId) {
+        const session = this.quizSessions.get(chatId);
+        if (!session) return null;
+
+        return {
+            topic: session.topic,
+            currentQuestion: session.currentQuestionIndex + 1,
+            totalQuestions: session.questions.length,
+            active: session.active,
+            participants: session.scores.size,
+            startTime: session.startTime,
+            timer: session.timer
+        };
+    }
+
+    // Get user scores
+    getUserScores(chatId) {
+        const session = this.quizSessions.get(chatId);
+        if (!session) return [];
+
+        return Array.from(session.scores.entries())
+            .map(([voter, score]) => ({
+                voter,
+                score,
+                username: voter.split('@')[0]
+            }))
+            .sort((a, b) => b.score - a.score);
     }
 }
-
-export default QuizEngine;
