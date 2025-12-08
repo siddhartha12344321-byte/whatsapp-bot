@@ -238,6 +238,10 @@ async function runNextQuestion(chatId) {
     });
 
     if (sentMsg) {
+        // Fix: Store outgoing poll message for voting logic
+        if (!simpleStore.messages[chatId]) simpleStore.messages[chatId] = {};
+        simpleStore.messages[chatId][sentMsg.key.id] = sentMsg;
+
         activePolls.set(sentMsg.key.id, {
             chatId,
             questionIndex: session.currentIndex,
@@ -518,13 +522,16 @@ async function startSock() {
                     const originalMsg = store.loadMessage(pollData.chatId, pollId);
                     if (originalMsg) {
                         const votes = await getAggregateVotesInPollMessage({
-                            message: originalMsg, // Baileys expects the stored message
+                            message: originalMsg,
                             pollUpdates: update.update.pollUpdates
                         });
+                        console.log(`🗳️ Votes calculated for Q${pollData.questionIndex + 1}:`, votes);
 
                         const correctOptionText = pollData.options[pollData.correctIndex];
                         const correctVoteEntry = votes.find(v => v.name === correctOptionText);
                         const currentCorrectVoters = new Set(correctVoteEntry ? correctVoteEntry.voters : []);
+
+                        console.log(`✅ Correct Answer: ${correctOptionText}, Voters: ${currentCorrectVoters.size}`);
 
                         const session = quizSessions.get(pollData.chatId);
                         if (session && session.active && session.questionScores[pollData.questionIndex]) {
@@ -534,6 +541,8 @@ async function startSock() {
                                 qScoreMap.set(voterJid, 1);
                             });
                         }
+                    } else {
+                        console.warn(`⚠️ Poll original message not found in store for ID: ${pollId}`);
                     }
                 }
             }
