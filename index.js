@@ -2261,7 +2261,6 @@ async function startClient() {
     async function connectToWhatsApp() {
         sock = makeWASocket({
             auth: state,
-            printQRInTerminal: true,
             logger: pino({ level: 'silent' }),
             browser: ['UPSC Study Bot', 'Chrome', '120.0.0'],
             connectTimeoutMs: 60000,
@@ -2275,7 +2274,10 @@ async function startClient() {
 
             if (qr) {
                 qrCodeData = qr;
-                console.log("⚡ SCAN QR CODE TO CONNECT - QR Code displayed in terminal and at /qr");
+                // Generate QR code in terminal
+                qrcodeTerminal.generate(qr, { small: true });
+                console.log("⚡ SCAN QR CODE TO CONNECT");
+                console.log("⚡ QR Code also available at: /qr");
             }
 
             if (connection === 'close') {
