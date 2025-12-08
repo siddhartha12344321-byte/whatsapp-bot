@@ -29,6 +29,7 @@ import pdfParse from 'pdf-parse';
 import mongoose from 'mongoose';
 import { Pinecone } from '@pinecone-database/pinecone';
 import googleTTS from 'google-tts-api';
+import { promisify } from 'util';
 import QuizEngine from './quiz-engine.js';
 
 // ESM __dirname equivalent
@@ -828,8 +829,7 @@ async function updateUserProfile(userId, name, topic, scoreToAdd = 0) {
     } catch (e) { console.error("DB Error:", e); return { name: name || 'Friend', highScore: 0 }; }
 }
 
-const util = require('util');
-const sleep = util.promisify(setTimeout);
+const sleep = promisify(setTimeout);
 
 // Updated model list with official model names (prioritized by stability and performance)
 const MODELS = [
