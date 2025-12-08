@@ -4,21 +4,22 @@ const originalError = console.error;
 const originalWarn = console.warn;
 
 const getTimestamp = () => new Date().toISOString().split('T')[1].split('.')[0];
-console.log = function(...args) {
+console.log = function (...args) {
     originalLog(`[${getTimestamp()}]`, ...args);
 };
-console.error = function(...args) {
+console.error = function (...args) {
     originalError(`[${getTimestamp()}]`, ...args);
 };
-console.warn = function(...args) {
+console.warn = function (...args) {
     originalWarn(`[${getTimestamp()}]`, ...args);
 };
 
-const { Client, LocalAuth, RemoteAuth, Poll, MessageMedia } = require('whatsapp-web.js');
+const { makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, getAggregateVotesInPollMessage } = require('@whiskeysockets/baileys');
 const { MongoStore } = require('wwebjs-mongo');
 const qrcode = require('qrcode-terminal');
 const QRCodeImage = require('qrcode');
 const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generative-ai");
+const pino = require('pino');
 const express = require('express');
 const fs = require('fs');
 const sanitizeHtml = require('sanitize-html');
@@ -194,14 +195,14 @@ const rateLimit = new Map();
 function cleanupMemory() {
     const now = Date.now();
     const maxAge = 24 * 60 * 60 * 1000; // 24 hours
-    
+
     // Clean old chat history
     for (const [chatId, history] of chatHistory.entries()) {
         if (history.length > 0 && now - history[history.length - 1].timestamp > maxAge) {
             chatHistory.delete(chatId);
         }
     }
-    
+
     // Clean old rate limits
     for (const [chatId, lastRequest] of rateLimit.entries()) {
         if (now - lastRequest > maxAge) {
@@ -282,7 +283,7 @@ function normalizeMessagesForGroq(messages) {
         let role = msg.role;
         if (role === 'model') role = 'assistant';
         if (role === 'system') role = 'user';  // Groq doesn't support system role, convert to user
-        
+
         // If message is already in correct format, return as is
         return {
             role: role,
@@ -592,7 +593,7 @@ async function callWithRetry(fn, retries = 0) { // Default 0 retries to avoid la
     } catch (e) {
         embeddingFailCount++;
         const now = Date.now();
-        
+
         // Only log embedding errors once per cooldown period to avoid spam
         if (now - lastEmbeddingErrorTime > EMBEDDING_ERROR_COOLDOWN) {
             if (e.message?.includes('429') || e.message?.includes('quota')) {
@@ -611,7 +612,7 @@ async function getEmbedding(text) {
     if (embeddingFailCount > 3) {
         return null; // Return null instead of trying, avoids spam
     }
-    
+
     try {
         return await callWithRetry(async () => {
             if (!genAI) rotateKey();
@@ -631,14 +632,14 @@ async function getEmbedding(text) {
 async function upsertToPinecone(text, id) {
     // Skip if Pinecone not available
     if (!pc) return;
-    
+
     try {
         const vector = await getEmbedding(text);
         if (!vector) return; // Silently skip if embedding failed
-        
+
         const index = pc.index(indexName);
         await index.upsert([{ id: id, values: vector, metadata: { text: text.substring(0, 2000) } }]);
-    } catch (e) { 
+    } catch (e) {
         // Only log Pinecone errors occasionally to avoid spam
         if (Math.random() < 0.1) { // Log 10% of errors
             console.warn("⚠️ Memory store error - continuing without persistence");
@@ -649,7 +650,7 @@ async function upsertToPinecone(text, id) {
 async function queryPinecone(queryText) {
     // Skip if Pinecone not available
     if (!pc) return null;
-    
+
     try {
         const vector = await getEmbedding(queryText);
         if (!vector) return null; // Embedding failed, skip gracefully
@@ -659,7 +660,7 @@ async function queryPinecone(queryText) {
         if (queryResponse.matches.length > 0) {
             return queryResponse.matches.filter(m => m.score > 0.5).map(m => m.metadata.text).join("\n\n");
         }
-    } catch (e) { 
+    } catch (e) {
         // Silently fail - embeddings/Pinecone optional
         if (Math.random() < 0.05) { // Log only 5% to avoid spam
             console.warn("⚠️ Memory retrieval skipped - continuing without context");
@@ -966,17 +967,17 @@ async function runQuizStep(chat, chatId) {
 }
 
 async function handleImageGeneration(msg, prompt) {
-    await msg.reply("🎨 Drawing...").catch(() => {});
+    await msg.reply("🎨 Drawing...").catch(() => { });
     try {
         const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?nologo=true`;
         const media = await MessageMedia.fromUrl(url, { unsafeMime: true });
-        await msg.reply(media).catch(() => {});
-    } catch (e) { console.error(e); await msg.reply("❌ Image Gen Failed").catch(() => {}); }
+        await msg.reply(media).catch(() => { });
+    } catch (e) { console.error(e); await msg.reply("❌ Image Gen Failed").catch(() => { }); }
 }
 
 async function handleWebSearch(msg, query) {
     if (!process.env.TAVILY_API_KEY) return "No API Key";
-    await msg.reply("🕵️‍♂️ Searching...").catch(() => {});
+    await msg.reply("🕵️‍♂️ Searching...").catch(() => { });
     try {
         const response = await fetch("https://api.tavily.com/search", {
             method: "POST",
@@ -986,7 +987,7 @@ async function handleWebSearch(msg, query) {
         const data = await response.json();
         let txt = data.answer ? `📝 ${data.answer}\n` : "";
         if (data.results) data.results.forEach(r => txt += `- [${r.title}](${r.url})\n`);
-        await msg.reply(txt || "No results").catch(() => {});
+        await msg.reply(txt || "No results").catch(() => { });
         return txt;
     } catch (e) { return null; }
 }
@@ -1179,7 +1180,7 @@ async function handleMessage(msg) {
 
         // Handle poll/question explanation request
         if (isPollReply || prompt.toLowerCase().includes("explain") || prompt.toLowerCase().includes("solution") || prompt.toLowerCase().includes("answer")) {
-            await msg.reply("⚡ Quick analysis...").catch(() => {});
+            await msg.reply("⚡ Quick analysis...").catch(() => { });
 
             // Combine poll content with user's request
             const fullPrompt = pollContent
@@ -1235,7 +1236,7 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
 
                 // Format the response as exam tutor explanation
                 const formattedResponse = formatExamTutorResponse(pollContent, explanation, isPollReply);
-                await msg.reply(formattedResponse).catch(() => {});
+                await msg.reply(formattedResponse).catch(() => { });
 
                 // Extract and save memories
                 const fullConversation = `${fullPrompt}\n${explanation}`;
@@ -1250,7 +1251,7 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                 return;
             } catch (err) {
                 console.error("Error generating explanation:", err);
-                await msg.reply("⚠️ Could not generate explanation at the moment. Please try again in a moment.").catch(() => {});
+                await msg.reply("⚠️ Could not generate explanation at the moment. Please try again in a moment.").catch(() => { });
                 return;
             }
         }
@@ -1260,7 +1261,7 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
 
         // Priority 1: Topic Quiz Generation (Text-based)
         if (prompt.match(/\b(create|generate|make|start)\s+(?:a\s+)?(?:mock\s+)?(?:test|quiz|poll)/i) && !msg.hasMedia) {
-            await msg.reply("🧠 Analyzing request and generating quiz...").catch(() => {});
+            await msg.reply("🧠 Analyzing request and generating quiz...").catch(() => { });
 
             // 1. Parse Timer
             let timer = 30; // default 30 seconds
@@ -1321,20 +1322,20 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                 });
 
                 if (questions.length === 0) {
-                    await msg.reply(`❌ Could not generate questions for "${topic}". Please try a simpler topic.`).catch(() => {});
+                    await msg.reply(`❌ Could not generate questions for "${topic}". Please try a simpler topic.`).catch(() => { });
                     return;
                 }
 
-                await msg.reply(`✅ Generated ${questions.length} questions on "${topic}"\n⏱️ Timer: ${timer}s per question\n\n🎯 Starting quiz now!`).catch(() => {});
+                await msg.reply(`✅ Generated ${questions.length} questions on "${topic}"\n⏱️ Timer: ${timer}s per question\n\n🎯 Starting quiz now!`).catch(() => { });
                 try {
                     quizEngine.startQuiz(chat, chat.id._serialized, questions, topic, timer);
                 } catch (quizErr) {
                     console.error("⚠️ Quiz start error:", quizErr.message?.substring(0, 80));
-                    await msg.reply("⚠️ Quiz starting... please wait.").catch(() => {});
+                    await msg.reply("⚠️ Quiz starting... please wait.").catch(() => { });
                 }
             } catch (e) {
                 console.error("Topic Quiz Error:", e);
-                await msg.reply(`❌ Quiz Generation Error: ${e.message}`).catch(() => {});
+                await msg.reply(`❌ Quiz Generation Error: ${e.message}`).catch(() => { });
             }
             return;
         }
@@ -1350,10 +1351,10 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                 try {
                     const imageDescription = await analyzeImageWithDeepSeek(media);
                     console.log("📸 Image analysis complete");
-                    
+
                     // Use the image description as additional context
                     const enhancedPrompt = `Image content: ${imageDescription}\n\nUser request: ${prompt}`;
-                    
+
                     // Send to AI with enhanced context
                     try {
                         const response = await quizEngine.chat(enhancedPrompt, normalizeMessagesForGroq(chatHistory.get(chatId) || []));
@@ -1366,12 +1367,12 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                         }
                     } catch (groqErr) {
                         console.error("❌ Groq error:", groqErr.message?.substring(0, 80));
-                        await msg.reply("⚠️ Thinking... please wait a moment.").catch(() => {});
+                        await msg.reply("⚠️ Thinking... please wait a moment.").catch(() => { });
                     }
                     return;
                 } catch (err) {
                     console.error("❌ Image analysis error:", err.message?.substring(0, 80));
-                    await msg.reply("📷 Image received. Please describe what you need.").catch(() => {});
+                    await msg.reply("📷 Image received. Please describe what you need.").catch(() => { });
                     return;
                 }
             }
@@ -1583,10 +1584,10 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
 
         if (isExplicitQuizRequest && !msg.hasMedia && !prompt.toLowerCase().includes("create") && !prompt.toLowerCase().includes("manual") && !prompt.toLowerCase().includes("pdf")) {
             if (quizEngine.isQuizActive(chat.id._serialized)) {
-                await msg.reply("⚠️ Quiz already active. Type 'stop quiz' to end it first.").catch(() => {});
+                await msg.reply("⚠️ Quiz already active. Type 'stop quiz' to end it first.").catch(() => { });
                 return;
             }
-            await msg.reply("🎲 Starting General Quiz...").catch(() => {});
+            await msg.reply("🎲 Starting General Quiz...").catch(() => { });
             const questions = [
                 { question: "What is the capital of India?", options: ["Mumbai", "Delhi", "Chennai", "Kolkata"], correct_index: 1, answer_explanation: "New Delhi is the capital." },
                 { question: "2 + 2 = ?", options: ["3", "4", "5", "6"], correct_index: 1, answer_explanation: "Basic arithmetic." }
@@ -1595,7 +1596,7 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                 quizEngine.startQuiz(chat, chat.id._serialized, questions, "General", 30);
             } catch (quizErr) {
                 console.error("⚠️ General quiz start error:", quizErr.message?.substring(0, 80));
-                await msg.reply("⚠️ Quiz starting... please wait.").catch(() => {});
+                await msg.reply("⚠️ Quiz starting... please wait.").catch(() => { });
             }
             return;
         }
@@ -1733,7 +1734,7 @@ Don't force a rigid format - adapt to the question type naturally.`;
                     const url = googleTTS.getAudioUrl(responseText, { lang: 'en', slow: false });
                     const media = await MessageMedia.fromUrl(url, { unsafeMime: true });
                     await client.sendMessage(msg.from, media, { sendAudioAsVoice: true });
-                } catch (voiceErr) { 
+                } catch (voiceErr) {
                     try {
                         await msg.reply(responseText);
                     } catch (textErr) {
@@ -1799,24 +1800,6 @@ async function startClient() {
         try {
             puppetConfig.executablePath = await chromium.executablePath();
         } catch (err) {
-            console.error('⚠️ Chromium path error:', err.message);
-        }
-    }
-
-    try {
-        client = new Client({
-            authStrategy: store ? new RemoteAuth({ store: store, backupSyncIntervalMs: 60000 }) : new LocalAuth(),
-            puppeteer: puppetConfig,
-            webVersionCache: {
-                type: 'remote',
-                remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
-            }
-        });
-
-        client.on('qr', (qr) => {
-            qrCodeData = qr;
-            qrcode.generate(qr, { small: true });
-            console.log("⚡ SCAN QR CODE TO CONNECT - QR Code displayed in browser at /qr");
         });
 
         client.on('ready', () => {
@@ -1844,10 +1827,10 @@ async function startClient() {
         client.on('remote_session_saved', () => console.log('💾 Session saved to database'));
 
         console.log('🔄 Initializing WhatsApp connection (this may take 30-60 seconds on first run)...');
-        
+
         // Initialize with timeout for better UX
         const initPromise = client.initialize();
-        const timeoutPromise = new Promise((_, reject) => 
+        const timeoutPromise = new Promise((_, reject) =>
             setTimeout(() => reject(new Error('Initialization timeout after 120 seconds')), 120000)
         );
 
