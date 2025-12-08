@@ -14,21 +14,46 @@ console.warn = function (...args) {
     originalWarn(`[${getTimestamp()}]`, ...args);
 };
 
-const { Client, LocalAuth, RemoteAuth, Poll, MessageMedia } = require('whatsapp-web.js');
-const { MongoStore } = require('wwebjs-mongo');
+// Baileys WhatsApp Client (Superfast - No Puppeteer)
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage, proto, getContentType } = require('@whiskeysockets/baileys');
+const pino = require('pino');
 const qrcode = require('qrcode-terminal');
 const QRCodeImage = require('qrcode');
 const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generative-ai");
 const express = require('express');
 const fs = require('fs');
+const path = require('path');
 const sanitizeHtml = require('sanitize-html');
-const chromium = require('@sparticuz/chromium');
-const puppeteer = require('puppeteer-core');
 const pdfParse = require('pdf-parse');
 const mongoose = require('mongoose');
 const { Pinecone } = require('@pinecone-database/pinecone');
 const googleTTS = require('google-tts-api');
 const QuizEngine = require('./quiz-engine');
+
+// Message Queue for Sequential Processing
+const messageQueue = [];
+let isProcessingQueue = false;
+
+async function processMessageQueue() {
+    if (isProcessingQueue || messageQueue.length === 0) return;
+    isProcessingQueue = true;
+
+    while (messageQueue.length > 0) {
+        const { msg, sock } = messageQueue.shift();
+        try {
+            await handleMessage(msg, sock);
+        } catch (err) {
+            console.error("❌ Queue message processing error:", err.message);
+        }
+    }
+
+    isProcessingQueue = false;
+}
+
+function enqueueMessage(msg, sock) {
+    messageQueue.push({ msg, sock });
+    processMessageQueue();
+}
 
 const indexName = 'whatsapp-bot';
 
@@ -1367,9 +1392,135 @@ function formatExamTutorResponse(questionContent, explanation, isPoll = false) {
     return response;
 }
 
-async function handleMessage(msg) {
+// --- BAILEYS MESSAGE ADAPTER ---
+// Converts Baileys message format to be compatible with existing code
+function getMessageText(msg) {
+    const msgType = getContentType(msg.message);
+    if (msgType === 'conversation') return msg.message.conversation;
+    if (msgType === 'extendedTextMessage') return msg.message.extendedTextMessage?.text;
+    if (msgType === 'imageMessage') return msg.message.imageMessage?.caption || '';
+    if (msgType === 'videoMessage') return msg.message.videoMessage?.caption || '';
+    if (msgType === 'documentMessage') return msg.message.documentMessage?.caption || '';
+    return '';
+}
+
+function getMediaType(msg) {
+    const msgType = getContentType(msg.message);
+    if (msgType === 'imageMessage') return 'image';
+    if (msgType === 'audioMessage' || msgType === 'pttMessage') return 'audio';
+    if (msgType === 'videoMessage') return 'video';
+    if (msgType === 'documentMessage') return 'document';
+    return null;
+}
+
+async function downloadBaileysMedia(msg, sock) {
     try {
-        console.log(`📩 RECEIVED: ${msg.body} from ${msg.from}`);
+        const buffer = await downloadMediaMessage(msg, 'buffer', {});
+        const msgType = getContentType(msg.message);
+        let mimetype = 'application/octet-stream';
+
+        if (msgType === 'imageMessage') mimetype = msg.message.imageMessage?.mimetype || 'image/jpeg';
+        else if (msgType === 'audioMessage') mimetype = msg.message.audioMessage?.mimetype || 'audio/ogg';
+        else if (msgType === 'pttMessage') mimetype = 'audio/ogg';
+        else if (msgType === 'documentMessage') mimetype = msg.message.documentMessage?.mimetype || 'application/pdf';
+
+        return {
+            data: buffer.toString('base64'),
+            mimetype: mimetype,
+            filename: msg.message.documentMessage?.fileName || 'file'
+        };
+    } catch (err) {
+        console.error("Media download error:", err.message);
+        return null;
+    }
+}
+
+// Create Baileys-compatible chat object
+function createBaileysChat(msg, sock) {
+    const chatId = msg.key.remoteJid;
+    const isGroup = chatId.endsWith('@g.us');
+
+    return {
+        id: { _serialized: chatId },
+        isGroup: isGroup,
+        name: msg.pushName || 'User',
+        sendMessage: async (content, options = {}) => {
+            try {
+                // Handle polls
+                if (content && content.pollValues) {
+                    return await sock.sendMessage(chatId, {
+                        poll: {
+                            name: content.name || 'Poll',
+                            values: content.pollValues,
+                            selectableCount: 1
+                        }
+                    });
+                }
+
+                // Handle text with mentions
+                if (options.mentions && options.mentions.length > 0) {
+                    return await sock.sendMessage(chatId, {
+                        text: content,
+                        mentions: options.mentions
+                    });
+                }
+
+                // Regular text
+                return await sock.sendMessage(chatId, { text: content });
+            } catch (err) {
+                console.error("Send message error:", err.message);
+            }
+        }
+    };
+}
+
+// Create Baileys-compatible msg wrapper
+function wrapBaileysMessage(msg, sock) {
+    const chatId = msg.key.remoteJid;
+    const messageText = getMessageText(msg);
+    const mediaType = getMediaType(msg);
+
+    return {
+        // Original Baileys message
+        _baileys: msg,
+        _sock: sock,
+
+        // Compatibility properties
+        body: messageText,
+        from: chatId,
+        id: { id: msg.key.id },
+        type: mediaType || 'chat',
+        hasMedia: mediaType !== null,
+        mentionedIds: msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [],
+        _data: { notifyName: msg.pushName || 'User' },
+
+        // Methods
+        getChat: async () => createBaileysChat(msg, sock),
+        reply: async (text) => {
+            try {
+                await sock.sendMessage(chatId, { text: text }, { quoted: msg });
+            } catch (err) {
+                console.error("Reply error:", err.message);
+            }
+        },
+        downloadMedia: async () => await downloadBaileysMedia(msg, sock),
+        getQuotedMessage: async () => {
+            const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
+            if (!quoted) return null;
+            return {
+                body: quoted.conversation || quoted.extendedTextMessage?.text || '',
+                type: getContentType(quoted)
+            };
+        }
+    };
+}
+
+async function handleMessage(rawMsg, sock) {
+    // Wrap Baileys message for compatibility
+    const msg = wrapBaileysMessage(rawMsg, sock);
+
+    try {
+        console.log(`📩 RECEIVED: ${msg.body?.substring(0, 50) || '[media]'} from ${msg.from}`);
         const chat = await msg.getChat();
 
         // Check if user is replying to a poll/question
@@ -1383,7 +1534,9 @@ async function handleMessage(msg) {
 
         // STRICT GATEKEEPER
         if (chat.isGroup) {
-            const isTagged = msg.mentionedIds.includes(client.info.wid._serialized) || msg.body.includes("@");
+            // Get bot JID (Baileys format)
+            const botJid = sock?.user?.id || client?.user?.id || '';
+            const isTagged = msg.mentionedIds.some(id => id.includes(botJid.split(':')[0])) || msg.body?.includes("@");
             const hasSession = quizEngine.isQuizActive(chat.id._serialized);
 
             // Allow poll replies even if not tagged
@@ -2071,115 +2224,107 @@ DO NOT force MCQ format for normal questions. Reply naturally but concisely.`;
 }
 
 // --- INITIALIZATION ---
+// Baileys Socket reference (global)
+let sock = null;
+
 async function startClient() {
     console.log('🔄 Starting bot initialization...');
 
-    // Connect to MongoDB FIRST - must complete before MongoStore
+    // Connect to MongoDB
     console.log('🔄 Connecting to MongoDB...');
-    let mongoConnected = false;
     try {
         await mongoose.connect(MONGODB_URI, {
-            serverSelectionTimeoutMS: 10000, // 10 second timeout
+            serverSelectionTimeoutMS: 10000,
             socketTimeoutMS: 45000,
         });
         console.log('🍃 MongoDB Connected Successfully');
-        mongoConnected = true;
     } catch (err) {
         console.error('⚠️ MongoDB Connection Warning:', err.message);
-        console.log('⚠️ Continuing without MongoDB - using LocalAuth');
+        console.log('⚠️ Continuing without MongoDB');
     }
 
-    let store = null;
-    if (mongoConnected) {
-        try {
-            store = new MongoStore({ mongoose: mongoose });
-            console.log('💾 MongoStore initialized');
-        } catch (err) {
-            console.error('⚠️ MongoStore Error:', err.message);
-            console.log('⚠️ Using LocalAuth as fallback');
-        }
-    } else {
-        console.log('⚠️ Skipping MongoStore - MongoDB not connected');
+    // Baileys Auth (File-based - works on Render)
+    const authDir = path.join(__dirname, 'auth_info_baileys');
+    if (!fs.existsSync(authDir)) {
+        fs.mkdirSync(authDir, { recursive: true });
     }
 
-    let puppetConfig = {
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
-    };
+    const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
-    if (process.platform === 'win32') {
-        puppetConfig.executablePath = `${process.env.LOCALAPPDATA}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`;
-        puppetConfig.headless = false;
-    } else {
-        try {
-            puppetConfig.executablePath = await chromium.executablePath();
-        } catch (err) {
-            console.error('⚠️ Chromium path error:', err.message);
-        }
-    }
+    console.log('🔄 Initializing Baileys WhatsApp connection...');
 
-    try {
-        client = new Client({
-            authStrategy: store ? new RemoteAuth({ store: store, backupSyncIntervalMs: 60000 }) : new LocalAuth(),
-            puppeteer: puppetConfig,
-            webVersionCache: {
-                type: 'remote',
-                remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
+    async function connectToWhatsApp() {
+        sock = makeWASocket({
+            auth: state,
+            printQRInTerminal: true,
+            logger: pino({ level: 'silent' }),
+            browser: ['UPSC Study Bot', 'Chrome', '120.0.0'],
+            connectTimeoutMs: 60000,
+            defaultQueryTimeoutMs: 60000,
+            keepAliveIntervalMs: 25000,
+        });
+
+        // Connection event
+        sock.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update;
+
+            if (qr) {
+                qrCodeData = qr;
+                console.log("⚡ SCAN QR CODE TO CONNECT - QR Code displayed in terminal and at /qr");
+            }
+
+            if (connection === 'close') {
+                const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+                console.log('⚠️ Connection closed. Reconnecting:', shouldReconnect);
+                if (shouldReconnect) {
+                    setTimeout(connectToWhatsApp, 3000);
+                }
+            } else if (connection === 'open') {
+                console.log("✅✅✅ BOT IS READY! ✅✅✅");
+                console.log("✅ WhatsApp Connected Successfully");
+                console.log(`✅ Bot Name: ${sock.user?.name || 'UPSC Study Bot'}`);
+                qrCodeData = "";
+                client = sock; // For compatibility with existing code
             }
         });
 
-        client.on('qr', (qr) => {
-            qrCodeData = qr;
-            qrcode.generate(qr, { small: true });
-            console.log("⚡ SCAN QR CODE TO CONNECT - QR Code displayed in browser at /qr");
+        // Save credentials on update
+        sock.ev.on('creds.update', saveCreds);
+
+        // Message handler - enqueue for sequential processing
+        sock.ev.on('messages.upsert', async (m) => {
+            if (m.type !== 'notify') return;
+
+            for (const msg of m.messages) {
+                if (!msg.message || msg.key.fromMe) continue;
+                enqueueMessage(msg, sock);
+            }
         });
 
-        client.on('ready', () => {
-            console.log("✅✅✅ BOT IS READY! ✅✅✅");
-            console.log("✅ WhatsApp Connected Successfully");
-            console.log(`✅ Bot Name: ${client.info?.pushname || 'Unknown'}`);
-            qrCodeData = "";
+        // Poll vote handler (for quizzes)
+        sock.ev.on('messages.update', async (updates) => {
+            for (const update of updates) {
+                if (update.update?.pollUpdates) {
+                    try {
+                        const pollUpdates = update.update.pollUpdates;
+                        for (const pollUpdate of pollUpdates) {
+                            const vote = {
+                                parentMessage: { id: { id: update.key.id } },
+                                voter: pollUpdate.pollUpdateMessageKey?.participant || update.key.participant || update.key.remoteJid,
+                                selectedOptions: pollUpdate.vote?.selectedOptions?.map(opt => ({ name: opt })) || []
+                            };
+                            quizEngine.handleVote(vote);
+                        }
+                    } catch (err) {
+                        console.error("Poll vote error:", err.message);
+                    }
+                }
+            }
         });
-
-        client.on('authenticated', () => {
-            console.log("🔐 Authentication successful - Session restored/created");
-        });
-
-        client.on('auth_failure', (msg) => {
-            console.error("❌ Authentication failed:", msg);
-        });
-
-        client.on('disconnected', (reason) => {
-            console.log("⚠️ Client disconnected:", reason);
-            console.log("⚠️ Attempting to reconnect...");
-        });
-
-        client.on('vote_update', (vote) => quizEngine.handleVote(vote));
-        client.on('message', handleMessage);
-        client.on('remote_session_saved', () => console.log('💾 Session saved to database'));
-
-        console.log('🔄 Initializing WhatsApp connection (this may take 30-60 seconds on first run)...');
-
-        // Initialize with timeout for better UX
-        const initPromise = client.initialize();
-        const timeoutPromise = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('Initialization timeout after 120 seconds')), 120000)
-        );
-
-        try {
-            await Promise.race([initPromise, timeoutPromise]);
-            console.log('✅ Client initialization complete - Bot is ready!');
-        } catch (timeoutErr) {
-            console.error('❌ Initialization timeout:', timeoutErr.message);
-            throw timeoutErr;
-        }
-    } catch (err) {
-        console.error('❌ Failed to initialize WhatsApp client:', err.message);
-        if (err.message.includes('Timeout')) {
-            console.error('💡 Possible causes: Browser/Network issue, Invalid auth session');
-        }
-        throw err;
     }
+
+    await connectToWhatsApp();
+    console.log('✅ Baileys initialization complete - Superfast mode enabled!');
 }
 
 // Global error handlers

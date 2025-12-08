@@ -1,4 +1,4 @@
-const { Poll } = require('whatsapp-web.js');
+// Quiz Engine for Baileys WhatsApp Bot
 const pdfParse = require('pdf-parse');
 const util = require('util');
 const sleep = util.promisify(setTimeout);
@@ -397,17 +397,24 @@ Format:
 
         const questionStartTime = Date.now();
         const q = session.questions[session.index];
-        const poll = new Poll(`Q${session.index + 1}: ${q.question}`, q.options, { allowMultipleAnswers: false });
-        // NOTE: chat.sendMessage might fail if chat is not valid, but we assume it's passed correctly
-        const sentMsg = await chat.sendMessage(poll);
-        this.activePolls.set(sentMsg.id.id, { correctIndex: q.correct_index, chatId, questionIndex: session.index, originalOptions: q.options });
+
+        // Create poll using Baileys-compatible format
+        const pollData = {
+            name: `Q${session.index + 1}: ${q.question}`,
+            pollValues: q.options
+        };
+
+        // Send poll through chat.sendMessage (Baileys adapter handles conversion)
+        const sentMsg = await chat.sendMessage(pollData);
+        const msgId = sentMsg?.key?.id || `poll_${Date.now()}`;
+        this.activePolls.set(msgId, { correctIndex: q.correct_index, chatId, questionIndex: session.index, originalOptions: q.options });
 
         const messageSendTime = Date.now() - questionStartTime;
         const preciseDelay = Math.max(100, (session.timer * 1000) - messageSendTime);
 
         const timeoutId = setTimeout(() => {
             if (!this.quizSessions.has(chatId)) return;
-            this.activePolls.delete(sentMsg.id.id);
+            this.activePolls.delete(msgId);
             session.index++;
 
             // Recursive call for next step

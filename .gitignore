@@ -13,6 +13,7 @@ yarn-error.log*
 # WhatsApp session data
 .wwebjs_auth/
 .wwebjs_cache/
+auth_info_baileys/
 
 # Chat history
 chatHistory.json
