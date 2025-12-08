@@ -2,19 +2,29 @@ import makeWASocket, { useMultiFileAuthState, fetchLatestBaileysVersion, getAggr
 import pino from 'pino';
 import express from 'express';
 import qrcode from 'qrcode-terminal';
-import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
-const { QuizEngine } = require('./quiz-engine.js');
-// import googleTTS from 'google-tts-api'; // Not used in this minimal example
+import { QuizEngine } from './quiz-engine.js';
 
 // ---------- Configuration ----------
 const PORT = process.env.PORT || 3000;
 const app = express();
+
+// Serve static files from public folder
+import path from 'path';
+import { fileURLToPath } from 'url';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.json());
+
+// Routes
 app.get('/', (req, res) => {
     const status = sock && sock.user ? `✅ Connected as ${sock.user?.pushname || 'Unknown'}` : '⚠️ Not connected';
     res.send(`<h1>WhatsApp Bot Status</h1><p>${status}</p>`);
 });
 app.get('/health', (_, res) => res.send('OK'));
+app.get('/quizsection', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'quizsection.html'));
+});
 app.listen(PORT, () => console.log(`🚀 Express server listening on ${PORT}`));
 
 // ---------- Baileys Socket ----------

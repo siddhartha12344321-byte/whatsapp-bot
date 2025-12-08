@@ -1,7 +1,7 @@
-const { Poll } = require('whatsapp-web.js');
-const pdfParse = require('pdf-parse');
-const util = require('util');
-const sleep = util.promisify(setTimeout);
+// Note: Poll from whatsapp-web.js not used in Baileys version
+import pdfParse from 'pdf-parse';
+import { promisify } from 'util';
+const sleep = promisify(setTimeout);
 
 // Enhanced Logging for quiz-engine
 const getTimestamp = () => new Date().toISOString().split('T')[1].split('.')[0];
@@ -371,4 +371,4 @@ Format:
     }
 }
 
-module.exports = QuizEngine;
+export { QuizEngine };
