@@ -430,8 +430,8 @@ async function startSock() {
 
     sock = makeWASocket({
         auth: state,
-        printQRInTerminal: true,
-        logger: pino({ level: 'silent' }),
+        printQRInTerminal: false,
+        logger: pino({ level: 'info' }),
         browser: ["UPSC Bot", "Chrome", "1.0.0"],
         syncFullHistory: false
     });
@@ -442,7 +442,11 @@ async function startSock() {
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
-        if (qr) currentQR = qr;
+        if (qr) {
+            currentQR = qr;
+            console.log("Scan this QR Code to login:");
+            qrcodeTerminal.generate(qr, { small: true });
+        }
 
         if (connection === 'open') {
             isConnected = true;
@@ -460,7 +464,8 @@ async function startSock() {
         if (connection === 'close') {
             isConnected = false;
             const shouldReconnect = (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut);
-            console.log('❌ Connection Closed. Reconnecting:', shouldReconnect);
+            console.error('❌ Connection Closed:', lastDisconnect?.error);
+            console.log('Reconnecting:', shouldReconnect);
             if (shouldReconnect) startSock();
         }
     });
