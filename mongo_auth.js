@@ -10,7 +10,7 @@ export const useMongoDBAuthState = async (collection) => {
                 { upsert: true }
             );
         } catch (e) {
-            console.error(`MongoDB write error for ${id}:`, e);
+            console.error(`❌ [Auth] MongoDB Write Error for ${id}:`, e.message);
         }
     };
 

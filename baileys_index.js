@@ -449,11 +449,24 @@ async function handleMessage(msg, remoteJid) {
 }
 
 
+// Global Mongo Client
+const mongoClient = new MongoClient(MONGODB_URI);
+let authCollection = null;
+
+async function initMongo() {
+    try {
+        await mongoClient.connect();
+        authCollection = mongoClient.db("whatsapp_bot").collection("auth_state_baileys");
+        console.log("✅ MongoDB Global Client Connected");
+    } catch (e) {
+        console.error("❌ MongoDB Connection Error:", e);
+        process.exit(1);
+    }
+}
+
 // ---------- Socket Start ----------
 async function startSock() {
-    const mongoClient = new MongoClient(MONGODB_URI);
-    await mongoClient.connect();
-    const authCollection = mongoClient.db("whatsapp_bot").collection("auth_state_baileys");
+    if (!authCollection) await initMongo();
 
     // Auth
     const { state, saveCreds } = await useMongoDBAuthState(authCollection);
