@@ -15,7 +15,9 @@ console.warn = function (...args) {
 };
 
 // ES Module Imports (Baileys v6 requires ESM)
-import makeWASocket, { useMultiFileAuthState, DisconnectReason, downloadMediaMessage, getContentType } from '@whiskeysockets/baileys';
+import makeWASocket, { useMultiFileAuthState, DisconnectReason, downloadMediaMessage, getContentType, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } from '@whiskeysockets/baileys';
+import Boom from '@hapi/boom';
+import NodeCache from 'node-cache';
 import pino from 'pino';
 import qrcodeTerminal from 'qrcode-terminal';
 import QRCodeImage from 'qrcode';
@@ -2254,21 +2256,39 @@ async function startClient() {
         fs.mkdirSync(authDir, { recursive: true });
     }
 
-    const { state, saveCreds } = await useMultiFileAuthState(authDir);
+    let { state, saveCreds } = await useMultiFileAuthState(authDir);
 
     console.log('🔄 Initializing Baileys WhatsApp connection...');
+
+    // Message retry cache
+    const msgRetryCounterCache = new NodeCache();
 
     async function connectToWhatsApp() {
         console.log('🔄 Creating Baileys socket...');
 
+        // Fetch latest WhatsApp version
+        const { version, isLatest } = await fetchLatestBaileysVersion();
+        console.log(`📱 Using WhatsApp v${version.join('.')}, isLatest: ${isLatest}`);
+
         sock = makeWASocket({
-            auth: state,
-            logger: pino({ level: 'warn' }), // Changed to warn to see potential issues
-            browser: ['UPSC Study Bot', 'Chrome', '120.0.0'],
+            version,
+            auth: {
+                creds: state.creds,
+                keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }))
+            },
+            logger: pino({ level: 'warn' }),
+            browser: ['Chrome (Linux)', '', ''], // Linux browser string - critical for 405 fix
             connectTimeoutMs: 60000,
-            defaultQueryTimeoutMs: 60000,
+            defaultQueryTimeoutMs: 0, // Disable timeout
             keepAliveIntervalMs: 25000,
+            retryRequestDelayMs: 2000,
+            msgRetryCounterCache,
+            generateHighQualityLinkPreview: true,
             syncFullHistory: false,
+            emitOwnEvents: true,
+            fireInitQueries: true,
+            // Critical for free hosting - spoof as real browser
+            markOnlineOnConnect: false,
         });
 
         console.log('✅ Baileys socket created, waiting for connection events...');
@@ -2282,7 +2302,6 @@ async function startClient() {
             if (qr) {
                 console.log('🔳 QR CODE RECEIVED! Length:', qr.length);
                 qrCodeData = qr;
-                // Generate QR code in terminal
                 try {
                     qrcodeTerminal.generate(qr, { small: true });
                     console.log("⚡ SCAN QR CODE ABOVE TO CONNECT");
@@ -2294,10 +2313,24 @@ async function startClient() {
 
             if (connection === 'close') {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
-                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-                console.log(`⚠️ Connection closed. Status: ${statusCode}, Reconnecting: ${shouldReconnect}`);
-                if (shouldReconnect) {
-                    setTimeout(connectToWhatsApp, 5000); // Increased delay to 5 seconds
+                const reason = lastDisconnect?.error?.output?.payload?.error;
+                console.log(`⚠️ Connection closed. Status: ${statusCode}, Reason: ${reason}`);
+
+                // Handle 405 error specifically
+                if (statusCode === 405 || reason === 'Method Not Allowed') {
+                    console.log('⚠️ 405 Error Detected! Deleting auth and restarting...');
+                    if (fs.existsSync(authDir)) {
+                        fs.rmSync(authDir, { recursive: true });
+                        console.log('🗑️ Deleted old auth. Will generate new QR.');
+                    }
+                    setTimeout(async () => {
+                        const { state: newState, saveCreds: newSaveCreds } = await useMultiFileAuthState(authDir);
+                        state = newState;
+                        saveCreds = newSaveCreds;
+                        connectToWhatsApp();
+                    }, 5000);
+                } else if (statusCode !== DisconnectReason.loggedOut) {
+                    setTimeout(connectToWhatsApp, 5000);
                 }
             } else if (connection === 'open') {
                 console.log("✅✅✅ BOT IS READY! ✅✅✅");
