@@ -3,6 +3,7 @@
   "version": "17.0.0",
   "description": "WhatsApp Bot - Baileys Superfast Edition",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "start": "node index.js"
   },

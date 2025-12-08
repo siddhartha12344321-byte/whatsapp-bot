@@ -14,21 +14,26 @@ console.warn = function (...args) {
     originalWarn(`[${getTimestamp()}]`, ...args);
 };
 
-// Baileys WhatsApp Client (Superfast - No Puppeteer)
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, downloadMediaMessage, proto, getContentType } = require('@whiskeysockets/baileys');
-const pino = require('pino');
-const qrcode = require('qrcode-terminal');
-const QRCodeImage = require('qrcode');
-const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generative-ai");
-const express = require('express');
-const fs = require('fs');
-const path = require('path');
-const sanitizeHtml = require('sanitize-html');
-const pdfParse = require('pdf-parse');
-const mongoose = require('mongoose');
-const { Pinecone } = require('@pinecone-database/pinecone');
-const googleTTS = require('google-tts-api');
-const QuizEngine = require('./quiz-engine');
+// ES Module Imports (Baileys v6 requires ESM)
+import makeWASocket, { useMultiFileAuthState, DisconnectReason, downloadMediaMessage, getContentType } from '@whiskeysockets/baileys';
+import pino from 'pino';
+import qrcodeTerminal from 'qrcode-terminal';
+import QRCodeImage from 'qrcode';
+import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/generative-ai';
+import express from 'express';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import sanitizeHtml from 'sanitize-html';
+import pdfParse from 'pdf-parse';
+import mongoose from 'mongoose';
+import { Pinecone } from '@pinecone-database/pinecone';
+import googleTTS from 'google-tts-api';
+import QuizEngine from './quiz-engine.js';
+
+// ESM __dirname equivalent
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Message Queue for Sequential Processing
 const messageQueue = [];

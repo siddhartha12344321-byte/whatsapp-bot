@@ -1,7 +1,7 @@
-// Quiz Engine for Baileys WhatsApp Bot
-const pdfParse = require('pdf-parse');
-const util = require('util');
-const sleep = util.promisify(setTimeout);
+// Quiz Engine for Baileys WhatsApp Bot (ESM)
+import pdfParse from 'pdf-parse';
+import { promisify } from 'util';
+const sleep = promisify(setTimeout);
 
 // Enhanced Logging for quiz-engine
 const getTimestamp = () => new Date().toISOString().split('T')[1].split('.')[0];
@@ -463,4 +463,4 @@ Format:
     }
 }
 
-module.exports = QuizEngine;
+export default QuizEngine;
