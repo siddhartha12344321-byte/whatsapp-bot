@@ -2354,22 +2354,45 @@ async function startClient() {
             }
         });
 
-        // Poll vote handler (for quizzes)
+        // Poll vote handler (for quizzes) - Baileys format
         sock.ev.on('messages.update', async (updates) => {
             for (const update of updates) {
+                console.log('📊 Message update received:', JSON.stringify(update, null, 2));
+
                 if (update.update?.pollUpdates) {
                     try {
                         const pollUpdates = update.update.pollUpdates;
+                        console.log('🗳️ Poll updates:', JSON.stringify(pollUpdates, null, 2));
+
                         for (const pollUpdate of pollUpdates) {
+                            // Extract voter JID
+                            const voterJid = pollUpdate.pollUpdateMessageKey?.participant
+                                || update.key.participant
+                                || update.key.remoteJid;
+
+                            // Extract selected options - Baileys stores them differently
+                            let selectedOptions = [];
+                            if (pollUpdate.vote?.selectedOptions) {
+                                selectedOptions = pollUpdate.vote.selectedOptions.map(opt => {
+                                    // opt could be a string or buffer
+                                    const optName = typeof opt === 'string' ? opt : opt.toString();
+                                    return { name: optName };
+                                });
+                            }
+
+                            console.log(`🗳️ Vote from ${voterJid}: ${JSON.stringify(selectedOptions)}`);
+
+                            // Create vote object matching quiz-engine.handleVote format
                             const vote = {
                                 parentMessage: { id: { id: update.key.id } },
-                                voter: pollUpdate.pollUpdateMessageKey?.participant || update.key.participant || update.key.remoteJid,
-                                selectedOptions: pollUpdate.vote?.selectedOptions?.map(opt => ({ name: opt })) || []
+                                voter: voterJid,
+                                selectedOptions: selectedOptions
                             };
+
                             quizEngine.handleVote(vote);
                         }
                     } catch (err) {
-                        console.error("Poll vote error:", err.message);
+                        console.error("❌ Poll vote error:", err.message, err.stack);
                     }
                 }
             }
