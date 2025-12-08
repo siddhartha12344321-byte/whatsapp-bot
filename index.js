@@ -2259,39 +2259,52 @@ async function startClient() {
     console.log('🔄 Initializing Baileys WhatsApp connection...');
 
     async function connectToWhatsApp() {
+        console.log('🔄 Creating Baileys socket...');
+
         sock = makeWASocket({
             auth: state,
-            logger: pino({ level: 'silent' }),
+            logger: pino({ level: 'warn' }), // Changed to warn to see potential issues
             browser: ['UPSC Study Bot', 'Chrome', '120.0.0'],
             connectTimeoutMs: 60000,
             defaultQueryTimeoutMs: 60000,
             keepAliveIntervalMs: 25000,
+            syncFullHistory: false,
         });
+
+        console.log('✅ Baileys socket created, waiting for connection events...');
 
         // Connection event
         sock.ev.on('connection.update', async (update) => {
+            console.log('📡 Connection update:', JSON.stringify(update, null, 2));
+
             const { connection, lastDisconnect, qr } = update;
 
             if (qr) {
+                console.log('🔳 QR CODE RECEIVED! Length:', qr.length);
                 qrCodeData = qr;
                 // Generate QR code in terminal
-                qrcodeTerminal.generate(qr, { small: true });
-                console.log("⚡ SCAN QR CODE TO CONNECT");
-                console.log("⚡ QR Code also available at: /qr");
+                try {
+                    qrcodeTerminal.generate(qr, { small: true });
+                    console.log("⚡ SCAN QR CODE ABOVE TO CONNECT");
+                    console.log("⚡ QR Code also available at: /qr");
+                } catch (qrErr) {
+                    console.error("❌ QR terminal generation failed:", qrErr.message);
+                }
             }
 
             if (connection === 'close') {
-                const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-                console.log('⚠️ Connection closed. Reconnecting:', shouldReconnect);
+                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+                console.log(`⚠️ Connection closed. Status: ${statusCode}, Reconnecting: ${shouldReconnect}`);
                 if (shouldReconnect) {
-                    setTimeout(connectToWhatsApp, 3000);
+                    setTimeout(connectToWhatsApp, 5000); // Increased delay to 5 seconds
                 }
             } else if (connection === 'open') {
                 console.log("✅✅✅ BOT IS READY! ✅✅✅");
                 console.log("✅ WhatsApp Connected Successfully");
                 console.log(`✅ Bot Name: ${sock.user?.name || 'UPSC Study Bot'}`);
                 qrCodeData = "";
-                client = sock; // For compatibility with existing code
+                client = sock;
             }
         });
 
