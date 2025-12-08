@@ -83,11 +83,13 @@ const QuizSchema = new mongoose.Schema({
         explanation: String
     }],
     creator: String,
+    status: { type: String, default: 'draft' },
     createdAt: { type: Date, default: Date.now },
     deployed: { type: Boolean, default: false },
     scheduledTime: Date,
     targetGroupId: String,
-    timer: { type: Number, default: 30 }
+    timer: { type: Number, default: 30 },
+    autoReportCard: { type: Boolean, default: true }
 });
 const Quiz = mongoose.model('Quiz', QuizSchema);
 
@@ -138,7 +140,27 @@ app.get('/api/quizzes/:creator', async (req, res) => {
 
 app.post('/api/quiz/create', async (req, res) => {
     try {
-        const quiz = new Quiz(req.body);
+        const data = req.body;
+        // Fix: Map frontend 'targetGroup' to schema 'targetGroupId'
+        if (data.targetGroup) data.targetGroupId = data.targetGroup;
+
+        const quiz = new Quiz(data);
+
+        // Immediate Deployment Trigger
+        if (data.status === 'active' && data.targetGroupId) {
+            if (sock) {
+                console.log(`🚀 Immediate Deployment: Starting quiz "${quiz.title}" in ${data.targetGroupId}`);
+                try {
+                    await startQuizSession(data.targetGroupId, quiz);
+                    quiz.deployed = true;
+                } catch (err) {
+                    console.error("❌ Failed to start quiz session:", err);
+                }
+            } else {
+                console.error("⚠️ Socket not ready for immediate deployment");
+            }
+        }
+
         await quiz.save();
         res.json({ success: true, id: quiz._id });
     } catch (e) { res.status(500).json({ error: e.message }); }
