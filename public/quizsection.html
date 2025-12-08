@@ -508,8 +508,8 @@
                     style="margin-bottom: 20px; padding: 20px; background: linear-gradient(135deg, rgba(0,255,136,0.1), rgba(0,204,106,0.05)); border-radius: 12px; border: 1px solid rgba(0,255,136,0.3);">
                     <label style="font-size: 1.1rem; color: #00ff88; font-weight: bold;">2️⃣ Deploy Now
                         (Instant)</label>
-                    <p style="color: #888; font-size: 0.9rem; margin: 8px 0;">Sends all questions one-by-one with 3s
-                        interval</p>
+                    <p style="color: #888; font-size: 0.9rem; margin: 8px 0;">Uses timer setting below for vote
+                        collection</p>
                     <button class="btn" onclick="deployNow()" style="margin-top: 10px; width: 100%;">🚀 DEPLOY
                         NOW</button>
                 </div>
@@ -731,8 +731,9 @@
             if (questions.length === 0) return alert('Please add at least one question');
 
             const autoReport = document.getElementById('autoReportCard').checked;
+            const timer = parseInt(document.getElementById('timer').value) || 30;  // Use timer from input
 
-            if (!confirm('Deploy quiz now?\n\nQuestions: ' + questions.length + '\nAuto Report: ' + (autoReport ? 'YES' : 'NO (Manual)'))) return;
+            if (!confirm('Deploy quiz now?\n\nQuestions: ' + questions.length + '\n⏱️ Timer: ' + timer + 's per question\nAuto Report: ' + (autoReport ? 'YES' : 'NO (Manual)'))) return;
 
             const data = {
                 title: title,
@@ -740,7 +741,7 @@
                 questions: questions,
                 status: 'active',
                 targetGroup: group,
-                timer: 3,  // Default 3s for instant deploy
+                timer: timer,  // Use timer from input (same as command mode)
                 scheduledTime: null,
                 autoReportCard: autoReport
             };

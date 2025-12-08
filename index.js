@@ -263,71 +263,123 @@ function normalizeMessagesForGroq(messages) {
     }).filter(m => m.content && m.content.trim().length > 0); // Remove empty messages
 }
 
-// Helper: Analyze image using Groq Vision API (llama-3.2-vision)
+// Helper: Analyze image using Groq Vision API (Llama 4 Scout - multimodal)
 async function analyzeImageWithVision(media, userPrompt = '') {
     const GROQ_API_KEY = process.env.GROQ_API_KEY;
-    if (!GROQ_API_KEY) {
-        throw new Error("Groq API key not configured");
-    }
 
-    try {
-        // Convert media data to base64 if not already
-        const base64Image = typeof media.data === 'string' ? media.data : Buffer.from(media.data).toString('base64');
-        const mimeType = media.mimetype || 'image/jpeg';
+    // Convert media data to base64 if not already
+    const base64Image = typeof media.data === 'string' ? media.data : Buffer.from(media.data).toString('base64');
+    const mimeType = media.mimetype || 'image/jpeg';
 
-        console.log("📡 Sending image to Groq Vision for analysis...");
+    const analysisPrompt = userPrompt || 'Please analyze this image and describe its contents in detail. If it contains math problems, solve them step by step. If it contains text, extract and read it clearly.';
 
-        const analysisPrompt = userPrompt || 'Please analyze this image and describe its contents in detail. If it contains math problems, solve them step by step. If it contains text, extract and read it clearly.';
+    // Try Groq Vision first (Llama 4 Scout - multimodal model)
+    if (GROQ_API_KEY) {
+        const VISION_MODELS = [
+            'meta-llama/llama-4-scout-17b-16e-instruct',  // Latest multimodal model
+            'meta-llama/llama-4-maverick-17b-128e-instruct'  // Alternative multimodal
+        ];
 
-        const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${GROQ_API_KEY}`
-            },
-            body: JSON.stringify({
-                model: 'llama-3.2-11b-vision-preview',
-                messages: [
-                    {
-                        role: 'user',
-                        content: [
+        for (const model of VISION_MODELS) {
+            try {
+                console.log(`📡 Trying Groq Vision model: ${model}...`);
+
+                const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${GROQ_API_KEY}`
+                    },
+                    body: JSON.stringify({
+                        model: model,
+                        messages: [
                             {
-                                type: 'text',
-                                text: analysisPrompt
-                            },
-                            {
-                                type: 'image_url',
-                                image_url: {
-                                    url: `data:${mimeType};base64,${base64Image}`
-                                }
+                                role: 'user',
+                                content: [
+                                    {
+                                        type: 'text',
+                                        text: analysisPrompt
+                                    },
+                                    {
+                                        type: 'image_url',
+                                        image_url: {
+                                            url: `data:${mimeType};base64,${base64Image}`
+                                        }
+                                    }
+                                ]
                             }
-                        ]
+                        ],
+                        max_tokens: 1500,
+                        temperature: 0.3
+                    })
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    const description = data.choices?.[0]?.message?.content;
+
+                    if (description && description.length > 0) {
+                        console.log(`✅ Image analysis successful with ${model}`);
+                        return description;
                     }
-                ],
-                max_tokens: 1500,
-                temperature: 0.3
-            })
-        });
-
-        if (!response.ok) {
-            const errorData = await response.json();
-            console.error("Groq Vision API error:", errorData);
-            throw new Error(`Groq Vision API error: ${response.status} - ${errorData?.error?.message || 'Unknown error'}`);
+                } else {
+                    const errorData = await response.json().catch(() => ({}));
+                    console.warn(`⚠️ Groq Vision ${model} failed:`, errorData?.error?.message || response.status);
+                    // Continue to next model
+                }
+            } catch (err) {
+                console.warn(`⚠️ Groq Vision ${model} error:`, err.message?.substring(0, 50));
+                // Continue to next model
+            }
         }
-
-        const data = await response.json();
-        const description = data.choices?.[0]?.message?.content;
-
-        if (!description) {
-            throw new Error("No image description received from Groq Vision");
-        }
-
-        console.log("✅ Image analysis successful");
-        return description;
-    } catch (err) {
-        console.error("❌ Groq Vision image analysis failed:", err.message);
-        throw err;
     }
+
+    // Fallback to Gemini Vision
+    const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY_2;
+    if (GEMINI_KEY) {
+        try {
+            console.log("📡 Trying Gemini Vision fallback...");
+
+            const response = await fetch(
+                `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contents: [{
+                            parts: [
+                                { text: analysisPrompt },
+                                {
+                                    inline_data: {
+                                        mime_type: mimeType,
+                                        data: base64Image
+                                    }
+                                }
+                            ]
+                        }],
+                        generationConfig: { temperature: 0.3, maxOutputTokens: 1500 }
+                    })
+                }
+            );
+
+            if (response.ok) {
+                const data = await response.json();
+                const description = data.candidates?.[0]?.content?.parts?.[0]?.text;
+
+                if (description && description.length > 0) {
+                    console.log("✅ Image analysis successful with Gemini Vision");
+                    return description;
+                }
+            } else {
+                const errText = await response.text();
+                console.warn("⚠️ Gemini Vision failed:", errText.substring(0, 100));
+            }
+        } catch (geminiErr) {
+            console.warn("⚠️ Gemini Vision error:", geminiErr.message?.substring(0, 50));
+        }
+    }
+
+    throw new Error("All vision models failed - please describe the image contents manually");
 }
 
 // Load chat history from MongoDB
@@ -681,12 +733,30 @@ async function deployQuizToGroup(quizId, groupId) {
         if (!quiz || !client) return;
 
         // Convert web quiz format to QuizEngine format (must match exactly)
-        const questions = quiz.questions.map((q, i) => ({
-            question: q.question,
-            options: q.options,
-            correct_index: q.correctIndex,  // QuizEngine uses correct_index
-            answer_explanation: q.explanation || 'No explanation provided'  // QuizEngine uses answer_explanation
-        }));
+        // Ensure correct_index is always a valid number (0-3)
+        const questions = quiz.questions.map((q, i) => {
+            // Parse correctIndex safely - it may come as string, number, or undefined
+            let correctIdx = 0;
+            if (typeof q.correctIndex === 'number') {
+                correctIdx = q.correctIndex;
+            } else if (typeof q.correctIndex === 'string') {
+                correctIdx = parseInt(q.correctIndex, 10);
+            }
+            // Ensure valid range (0-3)
+            if (isNaN(correctIdx) || correctIdx < 0 || correctIdx >= (q.options?.length || 4)) {
+                console.warn(`⚠️ Invalid correctIndex for Q${i + 1}: ${q.correctIndex}, defaulting to 0`);
+                correctIdx = 0;
+            }
+
+            console.log(`📝 Q${i + 1}: "${q.question?.substring(0, 30)}..." | Correct: Option ${correctIdx + 1} (${q.options?.[correctIdx]?.substring(0, 20)})`);
+
+            return {
+                question: q.question || `Question ${i + 1}`,
+                options: q.options || ['Option A', 'Option B', 'Option C', 'Option D'],
+                correct_index: correctIdx,  // QuizEngine uses correct_index
+                answer_explanation: q.explanation || 'No explanation provided'  // QuizEngine uses answer_explanation
+            };
+        });
 
         // Get the chat
         const chat = await client.getChatById(groupId);
@@ -704,6 +774,7 @@ async function deployQuizToGroup(quizId, groupId) {
         await chat.sendMessage(introMsg);
 
         // Start the quiz using QuizEngine
+        console.log(`🎮 Starting quiz "${quiz.title}" with ${questions.length} questions, timer: ${quiz.timer}s`);
         quizEngine.startQuiz(chat, groupId, questions, quiz.title, quiz.timer);
 
         console.log("🚀 Quiz '" + quiz.title + "' deployed to " + groupId);
@@ -1281,72 +1352,17 @@ async function extractPollOrQuestionContent(msg) {
     }
 }
 
-// Function to format exam tutor response - Attractive, concise, easy to read
+// Function to format exam tutor response - Clean and minimal
 function formatExamTutorResponse(questionContent, explanation, isPoll = false) {
-    // Extract the correct answer (usually first line or marked)
-    let correctAnswer = "";
-    let mainExplanation = "";
-    let keyPoints = [];
-
-    // Parse explanation to extract structured parts
-    const lines = explanation.split('\n').filter(line => line.trim().length > 0);
-
-    // Find correct answer
-    for (let i = 0; i < Math.min(5, lines.length); i++) {
-        if (lines[i].match(/correct|answer|option [A-D]/i) || lines[i].match(/^[A-D][).]/)) {
-            correctAnswer = lines[i].replace(/correct|answer|option/i, '').trim();
-            if (correctAnswer.length > 100) correctAnswer = correctAnswer.substring(0, 100) + '...';
-            break;
-        }
-    }
-    if (!correctAnswer && lines.length > 0) {
-        correctAnswer = lines[0].substring(0, 80);
-    }
-
-    // Extract main explanation (2-3 sentences, max 150 words)
-    const sentences = explanation.split(/[.!?]+/).filter(s => s.trim().length > 15);
-    mainExplanation = sentences.slice(0, 3).join('. ').trim();
-    if (mainExplanation.length > 200) {
-        mainExplanation = mainExplanation.substring(0, 200) + '...';
-    }
-
-    // Extract key points (bullet points or numbered)
-    keyPoints = lines.filter(line =>
-        line.trim().match(/^[•\-\*]/) ||
-        line.trim().match(/^[0-9]+[.)]/) ||
-        line.toLowerCase().includes('key') ||
-        line.toLowerCase().includes('important')
-    ).slice(0, 3);
-
-    // Build attractive, concise response
-    let response = `╔═══════════════════════════╗\n`;
-    response += `║  🎓 *EXAM EXPLANATION*  ║\n`;
-    response += `╚═══════════════════════════╝\n\n`;
+    // AI now generates proper UPSC format, just add header for polls
+    let response = '';
 
     if (isPoll && questionContent) {
-        response += `📋 *Question:*\n`;
-        response += `\`\`\`${questionContent.substring(0, 150)}\`\`\`\n\n`;
+        response += `📋 *Question:*\n${questionContent.substring(0, 200)}\n\n`;
     }
 
-    response += `✅ *ANSWER:*\n`;
-    response += `\`\`\`${correctAnswer || "See explanation below"}\`\`\`\n\n`;
-
-    response += `💡 *EXPLANATION:*\n`;
-    response += `${mainExplanation || explanation.substring(0, 200)}\n\n`;
-
-    if (keyPoints.length > 0) {
-        response += `🔑 *KEY POINTS:*\n`;
-        keyPoints.forEach((point, idx) => {
-            const cleanPoint = point.replace(/^[•\-\*\d+[.)]\s*/, '').trim();
-            if (cleanPoint.length > 0 && cleanPoint.length < 80) {
-                response += `  ${idx + 1}. ${cleanPoint}\n`;
-            }
-        });
-        response += `\n`;
-    }
-
-    response += `━━━━━━━━━━━━━━━━━━━━\n`;
-    response += `💪 *Keep practicing!* You've got this! 🚀`;
+    // Pass through the AI-generated format (already contains Answer, Elimination, Key Fact)
+    response += explanation;
 
     return response;
 }
@@ -1728,6 +1744,56 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                 return;
             }
 
+            // Priority 3: General PDF Reading - answer questions about PDF content
+            if (media.mimetype === 'application/pdf') {
+                console.log("📄 General PDF reading - extracting content...");
+                try {
+                    const pdfBuffer = Buffer.from(media.data, 'base64');
+                    const pdfText = await extractPdfText(pdfBuffer);
+
+                    if (!pdfText || pdfText.trim().length === 0) {
+                        await msg.reply("❌ Could not extract text from this PDF. It might be image-based or protected.");
+                        return;
+                    }
+
+                    // Truncate PDF text if too long (keep first 4000 chars for context)
+                    const truncatedText = pdfText.length > 4000
+                        ? pdfText.substring(0, 4000) + "\n\n[...PDF content truncated...]"
+                        : pdfText;
+
+                    // Use AI to answer the user's question about the PDF
+                    const pdfPrompt = `You are a UPSC study assistant. The user has sent a PDF document with this question: "${prompt}"
+
+PDF CONTENT:
+---
+${truncatedText}
+---
+
+Instructions:
+- Answer the user's question based on the PDF content above
+- Be CONCISE and to-the-point (max 100 words)
+- If asking "what is this about", give a brief summary
+- Focus on exam-relevant facts
+- If the question cannot be answered from the PDF, say so briefly`;
+
+                    const messagesArray = [
+                        { role: "system", content: "You are a helpful UPSC study assistant. Be concise." },
+                        { role: "user", content: pdfPrompt }
+                    ];
+
+                    const chatSession = await quizEngine.chat(messagesArray);
+                    const responseText = chatSession?.response?.text() || "Could not analyze PDF content.";
+
+                    await msg.reply(responseText).catch(() => { });
+                    console.log("✅ PDF reading complete");
+                    return;
+                } catch (e) {
+                    console.error("PDF Reading Error:", e);
+                    await msg.reply(`❌ Error reading PDF: ${e.message}`);
+                    return;
+                }
+            }
+
             // Handle other media types (text files, etc.)
             if (prompt.toLowerCase().includes("learn")) {
                 await msg.reply("🧠 Memorizing...");
@@ -1818,44 +1884,52 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
 
         const isVoice = msg.type === 'ptt' || msg.type === 'audio' || prompt.includes("speak");
 
-        console.log("🔍 Starting memory retrieval...");
-
-        // Get multiple types of context with timeout (1s max)
+        // SUPERFAST MODE: Memory retrieval disabled for instant responses
+        // To re-enable memory, uncomment the block below
         let ragContext = null, userMemories = null;
-        try {
-            const contextPromise = (async () => {
-                const [pineconeCtx, userMem] = await Promise.all([
-                    queryPinecone(prompt).catch(() => null),
-                    getUserMemories(chat.id._serialized, user.userId || chat.id._serialized.split('@')[0]).catch(() => null)
-                ]);
-                return { pineconeCtx, userMem };
-            })();
+        const context = null; // No memory context - direct AI response
 
-            const timeoutPromise = new Promise(resolve => setTimeout(() => resolve({ pineconeCtx: null, userMem: null }), 1000));
-
-            const result = await Promise.race([contextPromise, timeoutPromise]);
-            ragContext = result.pineconeCtx;
-            userMemories = result.userMem;
-        } catch (err) {
-            console.warn("⚠️ Memory retrieval timeout/error, continuing without context:", err.message);
+        /*
+        // === MEMORY RETRIEVAL (DISABLED FOR SPEED) ===
+        const simpleGreetings = ['hi', 'hlo', 'hello', 'hey', 'hii', 'ok', 'ik', 'thanks', 'bye', 'gm', 'gn'];
+        const isSimpleMessage = simpleGreetings.includes(prompt.toLowerCase().trim()) || prompt.length < 5;
+        
+        if (!isSimpleMessage) {
+            console.log("🔍 Starting memory retrieval...");
+            try {
+                const contextPromise = (async () => {
+                    const [pineconeCtx, userMem] = await Promise.all([
+                        queryPinecone(prompt).catch(() => null),
+                        getUserMemories(chat.id._serialized, user.userId || chat.id._serialized.split('@')[0]).catch(() => null)
+                    ]);
+                    return { pineconeCtx, userMem };
+                })();
+                const timeoutPromise = new Promise(resolve => setTimeout(() => resolve({ pineconeCtx: null, userMem: null }), 300));
+                const result = await Promise.race([contextPromise, timeoutPromise]);
+                ragContext = result.pineconeCtx;
+                userMemories = result.userMem;
+            } catch (err) {}
         }
-
-        // Combine all context
+        
         let contextParts = [];
         if (ragContext) contextParts.push(`📚 Study Materials:\n${ragContext}`);
         if (userMemories) contextParts.push(`👤 User Information:\n${userMemories}`);
-
         const context = contextParts.length > 0 ? contextParts.join('\n\n') : null;
-        console.log("📚 Memory context retrieved. Starting AI response...");
+        */
+
+        console.log("⚡ SUPERFAST MODE - Direct AI response (no memory retrieval)");
 
         let responseText = "";
 
-        // Detect if it's an MCQ/poll question (needs UPSC formatting)
-        const isMCQ = prompt.match(/\?/) && (
-            prompt.match(/^[A-D][).]\s*.+/) ||
-            prompt.match(/option [A-D]/i) ||
-            prompt.match(/choose|select|which.*correct/i) ||
-            isPollReply
+        // Detect MCQ/Poll question (needs UPSC elimination format)
+        const isMCQ = isPollReply || (
+            prompt.match(/\?/) && (
+                prompt.match(/[A-D][).]\s*.+/m) ||  // Has options A) B) etc
+                prompt.match(/option\s*[A-D]/i) ||
+                prompt.match(/which.*(?:correct|true|false|statement)/i) ||
+                prompt.match(/consider.*statement/i) ||
+                prompt.match(/assertion|reason/i)
+            )
         );
 
         try {
@@ -1864,31 +1938,40 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
             // Enhance prompt based on question type
             let enhancedPrompt = prompt;
             if (isMCQ) {
-                enhancedPrompt = `As an exam tutor, explain this MCQ/poll in MAX 100 words:\n${prompt}`;
+                enhancedPrompt = `UPSC MCQ Analysis:\n${prompt}`;
             }
 
-            const memoryContext = userMemories ? `\n\nRemember about this user: ${userMemories}` : '';
-
             const systemPrompt = isMCQ
-                ? `You are an exam tutor for UPSC/SSC/government exams. For MCQs/polls, provide structured explanation in MAX 100 words:
+                ? `You are an expert UPSC exam tutor. For MCQs/Polls, provide this EXACT format:
 
-Format for MCQs/Polls:
-✅ Answer: [Option + 1 sentence]
-💡 Explanation: [2-3 short sentences]
-🔑 Key Point: [1 concept]
+✅ *Answer:*
+[Option letter]) [Correct answer text]
 
-Be concise, clear, and exam-focused.${memoryContext}`
-                : `You are a helpful AI assistant. Be natural, conversational, and dynamic. 
-                
-Guidelines:
-- Answer naturally based on the question type
-- For general questions: Be friendly and helpful
-- For exam questions: Provide clear, structured answers
-- Keep responses concise but comprehensive
-- Be engaging and human-like
-- Remember past conversations${memoryContext}
+❌ *Elimination:*
+• [Wrong option 1]: [Why wrong - 1 line max]
+• [Wrong option 2]: [Why wrong - 1 line max]  
+• [Wrong option 3]: [Why wrong - 1 line max]
 
-Don't force a rigid format - adapt to the question type naturally.`;
+🎯 *Key Fact:*
+[One important concept/fact to remember - 1-2 lines max]
+
+RULES:
+- Be CRISP and PRECISE
+- No lengthy explanations
+- Only exam-relevant facts
+- Maximum 120 words total`
+                : `You are a UPSC study assistant. Be CONCISE and EXAM-FOCUSED.
+
+RULES:
+- Give SHORT, TO-THE-POINT answers  
+- No unnecessary greetings or fluff
+- Focus on facts relevant to UPSC/SSC exams
+- For simple greetings, reply briefly and ask how you can help
+- For study questions, provide crisp factual answers
+- Maximum 50-80 words for general queries
+- Be helpful but efficient - aspirants value time
+
+DO NOT force MCQ format for normal questions. Reply naturally but concisely.`;
 
             const messagesArray = [
                 { role: "system", content: systemPrompt },
@@ -1899,6 +1982,15 @@ Don't force a rigid format - adapt to the question type naturally.`;
             const chatSession = await quizEngine.chat(messagesArray);
 
             responseText = chatSession.response.text();
+
+            // Handle empty response - this was causing "Invalid updateHistory" errors
+            if (!responseText || responseText.trim().length === 0) {
+                console.warn("⚠️ AI returned empty response, using fallback");
+                responseText = isSimpleMessage
+                    ? "Hello! How can I assist you today? Do you have a question or topic you'd like to discuss? I'm here to help."
+                    : "I'd be happy to help with that! Could you provide a bit more detail about what you need?";
+            }
+
             console.log(`✅ Groq response generated successfully`);
         } catch (err) {
             console.error("🔥 All Models Failed:", err);
@@ -1917,17 +2009,15 @@ Don't force a rigid format - adapt to the question type naturally.`;
 
         console.log("📤 Sending Reply...");
 
-        // Extract and save important memories from conversation
-        const fullConversation = `${prompt}\n${responseText}`;
-        extractAndSaveMemory(
-            chat.id._serialized,
-            user.userId || chat.id._serialized.split('@')[0],
-            fullConversation
-        ).catch(err => console.error("Memory extraction error:", err));
-
-        // Save to persistent memory
-        await updateHistory(chat.id._serialized, "user", prompt, user.userId || chat.id._serialized.split('@')[0]);
-        await updateHistory(chat.id._serialized, "model", responseText, user.userId || chat.id._serialized.split('@')[0]);
+        // SUPERFAST MODE: Memory saving disabled for instant responses
+        // To re-enable, uncomment the block below
+        /*
+        if (responseText && responseText.trim().length > 0) {
+            extractAndSaveMemory(chat.id._serialized, user.userId || chat.id._serialized.split('@')[0], `${prompt}\n${responseText}`).catch(() => {});
+            updateHistory(chat.id._serialized, "user", prompt, user.userId || chat.id._serialized.split('@')[0]).catch(() => {});
+            updateHistory(chat.id._serialized, "model", responseText, user.userId || chat.id._serialized.split('@')[0]).catch(() => {});
+        }
+        */
 
         // Only format MCQs/polls in UPSC style, send others as-is
         if (isMCQ || isPollReply) {
