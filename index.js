@@ -1800,7 +1800,8 @@ async function startClient() {
         try {
             puppetConfig.executablePath = await chromium.executablePath();
         } catch (err) {
-        });
+            console.error('⚠️ Chromium path error:', err.message);
+        }
 
         client.on('ready', () => {
             console.log("✅✅✅ BOT IS READY! ✅✅✅");

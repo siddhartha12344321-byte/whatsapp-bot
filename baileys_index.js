@@ -2,8 +2,10 @@ import makeWASocket, { useMultiFileAuthState, fetchLatestBaileysVersion, getAggr
 import pino from 'pino';
 import express from 'express';
 import qrcode from 'qrcode-terminal';
-import { QuizEngine } from './quiz-engine.js';
-import googleTTS from 'google-tts-api';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+const { QuizEngine } = require('./quiz-engine.js');
+// import googleTTS from 'google-tts-api'; // Not used in this minimal example
 
 // ---------- Configuration ----------
 const PORT = process.env.PORT || 3000;

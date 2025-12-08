@@ -3,5 +3,5 @@ services:
     name: whatsapp-bot
     env: node
     buildCommand: npm install
-    startCommand: npm start
+    startCommand: node baileys_index.js
     autoDeploy: true
