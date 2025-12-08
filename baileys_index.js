@@ -1,4 +1,4 @@
-import makeWASocket, { useMultiFileAuthState, fetchLatestBaileysVersion, getAggregateVotesInPollMessage, DisconnectReason, downloadMediaMessage, delay, makeInMemoryStore } from '@whiskeysockets/baileys';
+import makeWASocket, { useMultiFileAuthState, fetchLatestBaileysVersion, getAggregateVotesInPollMessage, DisconnectReason, downloadMediaMessage, delay } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import express from 'express';
 import qrcodeTerminal from 'qrcode-terminal';
@@ -30,15 +30,34 @@ let currentQR = null;
 let isConnected = false;
 let groupCache = {}; // id -> name
 
-// InMemory Store for Baileys (to track poll messages)
-const store = makeInMemoryStore({ logger: pino().child({ level: 'silent', stream: 'store' }) });
-// We can bind the store later
+// --- Manual Simple Store (Fix for missing export) ---
+const simpleStore = {
+    messages: {}, // chatId -> { msgId -> msg }
+    bind: (ev) => {
+        ev.on('messages.upsert', ({ messages }) => {
+            for (const m of messages) {
+                const jid = m.key.remoteJid;
+                if (!jid) continue;
+                if (!simpleStore.messages[jid]) simpleStore.messages[jid] = {};
+                simpleStore.messages[jid][m.key.id] = m;
+
+                // Limit memory usage (keep last 100 messages per chat)
+                const keys = Object.keys(simpleStore.messages[jid]);
+                if (keys.length > 100) {
+                    delete simpleStore.messages[jid][keys[0]];
+                }
+            }
+        });
+    },
+    loadMessage: (jid, id) => {
+        return simpleStore.messages[jid]?.[id];
+    }
+};
+const store = simpleStore;
 
 // Quiz State
 const quizSessions = new Map(); // chatId -> Session Object
 const activePolls = new Map(); // pollMsgId -> { chatId, questionIndex, options, correctIndex }
-
-// Chat History
 const chatHistory = new Map();
 
 // ---------- AI Clients ----------
@@ -141,7 +160,6 @@ app.post('/api/quiz/deploy/:id', async (req, res) => {
         if (!groupId) return res.status(400).json({ error: 'No group selected' });
 
         if (!groupCache[groupId]) {
-            // Try to fetch to ensure access
             try { await sock.groupMetadata(groupId); } catch (e) { }
         }
 
@@ -168,7 +186,7 @@ async function startQuizSession(chatId, quizData) {
         questions: quizData.questions,
         timer: quizData.timer,
         currentIndex: 0,
-        questionScores: [], // Array of Map<userId, points> (0 or 1)
+        questionScores: [],
         chatId: chatId,
         active: true
     };
@@ -178,7 +196,7 @@ async function startQuizSession(chatId, quizData) {
 
 async function runNextQuestion(chatId) {
     const session = quizSessions.get(chatId);
-    if (!session || !session.active) return; // Stopped
+    if (!session || !session.active) return;
 
     if (session.currentIndex >= session.questions.length) {
         endQuiz(chatId);
@@ -186,7 +204,7 @@ async function runNextQuestion(chatId) {
     }
 
     const q = session.questions[session.currentIndex];
-    session.questionScores[session.currentIndex] = new Map(); // Init scores for this question
+    session.questionScores[session.currentIndex] = new Map();
 
     // Send Poll
     const sentMsg = await sock.sendMessage(chatId, {
@@ -214,7 +232,6 @@ async function runNextQuestion(chatId) {
             text: `⏰ Time's up!\n\n✅ Correct: *${correctOpt}*\n\n💡 ${q.explanation || ''}`
         });
 
-        // Clean up poll tracking after question ends (votes no longer counted)
         if (sentMsg) activePolls.delete(sentMsg.key.id);
 
         session.currentIndex++;
@@ -227,7 +244,6 @@ function endQuiz(chatId) {
     const session = quizSessions.get(chatId);
     if (!session) return;
 
-    // Aggregating Total Scores
     const totalScores = new Map();
     session.questionScores.forEach(qMap => {
         qMap.forEach((points, userId) => {
@@ -245,13 +261,11 @@ function endQuiz(chatId) {
     } else {
         sortedScores.forEach((entry, idx) => {
             const [uid, score] = entry;
-            // Format ID: 12345@s.whatsapp.net -> 12345
             const name = uid.split('@')[0];
             report += `${idx + 1}. @${name} : ${score}/${session.questions.length}\n`;
         });
     }
 
-    // Send Report
     sock.sendMessage(chatId, {
         text: report,
         mentions: sortedScores.map(s => s[0])
@@ -299,7 +313,6 @@ async function handleMessage(msg, remoteJid) {
     try {
         if (!msg.message) return;
 
-        // Populate Group Cache
         if (remoteJid.endsWith('@g.us')) {
             groupCache[remoteJid] = msg.pushName || (groupCache[remoteJid] || remoteJid);
         }
@@ -308,7 +321,6 @@ async function handleMessage(msg, remoteJid) {
         let text = msgContent.conversation || msgContent.extendedTextMessage?.text || msgContent.imageMessage?.caption || '';
         text = text.trim();
 
-        // 1. PDF Handling
         if (msgContent.documentMessage && msgContent.documentMessage.mimetype === 'application/pdf') {
             await sock.sendMessage(remoteJid, { text: "📄 Reading PDF..." });
             try {
@@ -330,7 +342,6 @@ async function handleMessage(msg, remoteJid) {
             return;
         }
 
-        // 2. Image Handling
         if (msgContent.imageMessage) {
             await sock.sendMessage(remoteJid, { text: "🔍 Analyzing Image..." });
             try {
@@ -343,10 +354,9 @@ async function handleMessage(msg, remoteJid) {
             return;
         }
 
-        // 3. Quiz Commands
         if (text.match(/!quiz stop/i) || text.match(/stop quiz/i)) {
             if (quizSessions.has(remoteJid)) {
-                quizSessions.get(remoteJid).active = false; // Stop loop
+                quizSessions.get(remoteJid).active = false;
                 quizSessions.delete(remoteJid);
                 await sock.sendMessage(remoteJid, { text: "🛑 Quiz Stopped." });
             } else {
@@ -356,7 +366,6 @@ async function handleMessage(msg, remoteJid) {
         }
 
         if (text.match(/!quiz start/i) || text.match(/create quiz/i)) {
-            // Simplified text quiz
             let topic = "General Knowledge";
             const match = text.match(/on\s+([a-zA-Z0-9 ]+)/i);
             if (match) topic = match[1];
@@ -373,16 +382,13 @@ async function handleMessage(msg, remoteJid) {
 
         if (!text) return;
 
-        // 4. AI Chat (Groq/Gemini)
         console.log(`📩 [${remoteJid}] ${text}`);
 
-        // Determine Personality
         const isMCQ = text.includes('?') && (text.includes('Option') || text.match(/^[A-D]\)/m));
         const systemPrompt = isMCQ
             ? "You are a UPSC Exam Tutor. For MCQs, give Answer, Explanation, and Key Concept. Concise."
             : "You are a helpful UPSC Exam Tutor. Helping students prepare. Be polite and concise.";
 
-        // History
         updateHistory(remoteJid, 'user', text);
         const messages = [
             { role: 'system', content: systemPrompt },
@@ -430,7 +436,6 @@ async function startSock() {
         syncFullHistory: false
     });
 
-    // Bind Store
     store.bind(sock.ev);
 
     sock.ev.on('creds.update', saveCreds);
@@ -443,8 +448,6 @@ async function startSock() {
             isConnected = true;
             currentQR = null;
             console.log('✅ Connected to WhatsApp!');
-
-            // Allow time for sync
             setTimeout(async () => {
                 try {
                     const groups = await sock.groupFetchAllParticipating();
@@ -477,30 +480,25 @@ async function startSock() {
                 const pollData = activePolls.get(pollId);
 
                 if (pollData) {
-                    const votes = await getAggregateVotesInPollMessage({
-                        message: update.update,
-                        key: update.key,
-                        pollUpdates: update.update.pollUpdates
-                    });
-
-                    // Logic: Check correct vote
-                    const correctOptionText = pollData.options[pollData.correctIndex];
-
-                    const correctVoteEntry = votes.find(v => v.name === correctOptionText);
-                    const currentCorrectVoters = new Set(correctVoteEntry ? correctVoteEntry.voters : []);
-
-                    // Update Session Scores for this question
-                    const session = quizSessions.get(pollData.chatId);
-                    if (session && session.active && session.questionScores[pollData.questionIndex]) {
-
-                        // We replace the entire map of who is currently winning this question
-                        // If they change vote, they are gone from currentCorrectVoters
-                        const qScoreMap = session.questionScores[pollData.questionIndex];
-                        qScoreMap.clear();
-
-                        currentCorrectVoters.forEach(voterJid => {
-                            qScoreMap.set(voterJid, 1);
+                    const originalMsg = store.loadMessage(pollData.chatId, pollId);
+                    if (originalMsg) {
+                        const votes = await getAggregateVotesInPollMessage({
+                            message: originalMsg, // Baileys expects the stored message
+                            pollUpdates: update.update.pollUpdates
                         });
+
+                        const correctOptionText = pollData.options[pollData.correctIndex];
+                        const correctVoteEntry = votes.find(v => v.name === correctOptionText);
+                        const currentCorrectVoters = new Set(correctVoteEntry ? correctVoteEntry.voters : []);
+
+                        const session = quizSessions.get(pollData.chatId);
+                        if (session && session.active && session.questionScores[pollData.questionIndex]) {
+                            const qScoreMap = session.questionScores[pollData.questionIndex];
+                            qScoreMap.clear();
+                            currentCorrectVoters.forEach(voterJid => {
+                                qScoreMap.set(voterJid, 1);
+                            });
+                        }
                     }
                 }
             }
