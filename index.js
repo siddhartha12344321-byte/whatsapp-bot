@@ -1494,7 +1494,12 @@ function createBaileysChat(msg, sock) {
         name: msg.pushName || 'User',
         sendMessage: async (content, options = {}) => {
             try {
-                // Handle polls
+                // Handle Baileys poll object format (passed from QuizEngine)
+                if (content && content.poll) {
+                    return await sock.sendMessage(chatId, content);
+                }
+
+                // Handle legacy poll format
                 if (content && content.pollValues) {
                     return await sock.sendMessage(chatId, {
                         poll: {
@@ -1513,8 +1518,13 @@ function createBaileysChat(msg, sock) {
                     });
                 }
 
-                // Regular text
-                return await sock.sendMessage(chatId, { text: content });
+                // Handle regular text or other objects
+                if (typeof content === 'string') {
+                    return await sock.sendMessage(chatId, { text: content });
+                } else {
+                    // Pass specific message objects directly (image, etc.)
+                    return await sock.sendMessage(chatId, content);
+                }
             } catch (err) {
                 console.error("Send message error:", err.message);
             }
@@ -1694,7 +1704,7 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
 
         // Priority 1: Topic Quiz Generation (Text-based)
         if (prompt.match(/\b(create|generate|make|start)\s+(?:a\s+)?(?:mock\s+)?(?:test|quiz|poll)/i) && !msg.hasMedia) {
-            await msg.reply("🧠 Analyzing request and generating quiz...").catch(() => { });
+            // await msg.reply("🧠 Analyzing request and generating quiz...").catch(() => { });
 
             // 1. Parse Timer
             let timer = 30; // default 30 seconds
@@ -1759,7 +1769,7 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                     return;
                 }
 
-                await msg.reply(`✅ Generated ${questions.length} questions on "${topic}"\n⏱️ Timer: ${timer}s per question\n\n🎯 Starting quiz now!`).catch(() => { });
+                // await msg.reply(`✅ Generated ${questions.length} questions on "${topic}"\n⏱️ Timer: ${timer}s per question\n\n🎯 Starting quiz now!`).catch(() => { });
                 try {
                     quizEngine.startQuiz(chat, chat.id._serialized, questions, topic, timer);
                 } catch (quizErr) {
@@ -1896,7 +1906,7 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                 console.log(`📄 Processing PDF: ${(pdfBuffer.length / 1024).toFixed(2)}KB, Topic: "${topic}", Timer: ${timer}s, Qty: ${qty}`);
 
                 try {
-                    await msg.reply(`🔍 Reading PDF and searching for "${topic}" questions...`);
+                    await msg.reply(`🔍 Reading PDF and generating quiz on "${topic}"...`);
 
                     const questions = await quizEngine.generateQuizFromPdfBuffer({
                         pdfBuffer,
@@ -1910,7 +1920,7 @@ Keep it SHORT, CLEAR, ATTRACTIVE. Students want quick understanding, not essays!
                         return;
                     }
 
-                    await msg.reply(`✅ Generated ${questions.length} questions on "${topic}"\n⏱️ Timer: ${timer}s per question\n\n🎯 Starting quiz now!`);
+                    // await msg.reply(`✅ Generated ${questions.length} questions on "${topic}"\n⏱️ Timer: ${timer}s per question\n\n🎯 Starting quiz now!`);
                     quizEngine.startQuiz(chat, chat.id._serialized, questions, topic, timer);
                 } catch (e) {
                     console.error("PDF Quiz Generation Error:", e);
