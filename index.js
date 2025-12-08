@@ -1986,7 +1986,10 @@ DO NOT force MCQ format for normal questions. Reply naturally but concisely.`;
             // Handle empty response - this was causing "Invalid updateHistory" errors
             if (!responseText || responseText.trim().length === 0) {
                 console.warn("⚠️ AI returned empty response, using fallback");
-                responseText = isSimpleMessage
+                // Check if it was a simple greeting
+                const simpleGreets = ['hi', 'hlo', 'hello', 'hey', 'hii', 'ok', 'ik', 'thanks', 'bye', 'gm', 'gn'];
+                const wasSimple = simpleGreets.includes(prompt.toLowerCase().trim()) || prompt.length < 5;
+                responseText = wasSimple
                     ? "Hello! How can I assist you today? Do you have a question or topic you'd like to discuss? I'm here to help."
                     : "I'd be happy to help with that! Could you provide a bit more detail about what you need?";
             }
