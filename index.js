@@ -2071,26 +2071,32 @@ DO NOT force MCQ format for normal questions. Reply naturally but concisely.`;
 async function startClient() {
     console.log('🔄 Starting bot initialization...');
 
-    // Connect to MongoDB (don't block if it fails, but log error)
+    // Connect to MongoDB FIRST - must complete before MongoStore
     console.log('🔄 Connecting to MongoDB...');
-    mongoose.connect(MONGODB_URI, {
-        serverSelectionTimeoutMS: 10000, // 10 second timeout
-        socketTimeoutMS: 45000,
-    }).then(() => {
-        console.log('🍃 MongoDB Connected Successfully');
-    }).catch((err) => {
-        console.error('⚠️ MongoDB Connection Warning:', err.message);
-        console.log('⚠️ Continuing without MongoDB - some features may be limited');
-    });
-
-    let store;
+    let mongoConnected = false;
     try {
-        store = new MongoStore({ mongoose: mongoose });
-        console.log('💾 MongoStore initialized');
+        await mongoose.connect(MONGODB_URI, {
+            serverSelectionTimeoutMS: 10000, // 10 second timeout
+            socketTimeoutMS: 45000,
+        });
+        console.log('🍃 MongoDB Connected Successfully');
+        mongoConnected = true;
     } catch (err) {
-        console.error('⚠️ MongoStore Error:', err.message);
-        console.log('⚠️ Using LocalAuth as fallback');
-        // Fallback to LocalAuth if MongoStore fails
+        console.error('⚠️ MongoDB Connection Warning:', err.message);
+        console.log('⚠️ Continuing without MongoDB - using LocalAuth');
+    }
+
+    let store = null;
+    if (mongoConnected) {
+        try {
+            store = new MongoStore({ mongoose: mongoose });
+            console.log('💾 MongoStore initialized');
+        } catch (err) {
+            console.error('⚠️ MongoStore Error:', err.message);
+            console.log('⚠️ Using LocalAuth as fallback');
+        }
+    } else {
+        console.log('⚠️ Skipping MongoStore - MongoDB not connected');
     }
 
     let puppetConfig = {
