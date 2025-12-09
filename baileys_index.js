@@ -13,6 +13,15 @@ import mongoose from 'mongoose';
 import { MongoClient } from 'mongodb';
 import fs from 'fs';
 
+// ---------- Global Error Handlers (Prevent Crashes) ----------
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('⚠️ Unhandled Rejection (not crashing):', reason?.message || reason);
+});
+process.on('uncaughtException', (error) => {
+    console.error('🚨 Uncaught Exception:', error.message);
+    // Don't exit - let the bot try to recover
+});
+
 // ---------- Configuration ----------
 const PORT = process.env.PORT || 3000;
 const __filename = fileURLToPath(import.meta.url);
@@ -483,9 +492,13 @@ async function startSock() {
     sock = makeWASocket({
         version,
         auth: state,
-        logger: pino({ level: 'info' }),
+        logger: pino({ level: 'warn' }), // Reduce log noise (was 'info')
         browser: ['Ubuntu', 'Chrome', '20.0.04'],
-        syncFullHistory: false
+        syncFullHistory: false,
+        // Better timeout handling for Render's network
+        connectTimeoutMs: 60000, // 60 seconds connection timeout
+        retryRequestDelayMs: 2000, // Wait 2s before retrying failed requests
+        defaultQueryTimeoutMs: 60000 // 60s for queries
     });
 
     store.bind(sock.ev);

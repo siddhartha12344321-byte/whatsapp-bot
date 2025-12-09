@@ -245,6 +245,101 @@ Format:
         });
     }
 
+    // Robust Baileys vote handler - handles multiple event patterns
+    // Can process raw vote events from Baileys in different formats
+    async handleVote(baileysVoteEvent) {
+        try {
+            log("🔍 Processing vote event...");
+
+            // Debug logging to diagnose vote structure
+            if (process.env.DEBUG_VOTES === 'true') {
+                console.log("=== VOTE EVENT DEBUG ===");
+                console.log("Full vote object:", JSON.stringify(baileysVoteEvent, null, 2));
+                console.log("vote type:", typeof baileysVoteEvent);
+                console.log("vote keys:", Object.keys(baileysVoteEvent || {}));
+                console.log("=== END DEBUG ===");
+            }
+
+            // Extract data from different Baileys patterns
+            let msgId, voter, selectedOptions;
+
+            // Pattern 1: Direct event with id property
+            if (baileysVoteEvent.id) {
+                msgId = baileysVoteEvent.id;
+                voter = baileysVoteEvent.participant || baileysVoteEvent.author;
+                selectedOptions = baileysVoteEvent.selectedOptions || [baileysVoteEvent.selectedOption];
+                log(`Pattern 1: Direct event - msgId=${msgId}`);
+            }
+            // Pattern 2: Nested in update.pollUpdates
+            else if (baileysVoteEvent.update && baileysVoteEvent.update.pollUpdates) {
+                const pollUpdate = baileysVoteEvent.update.pollUpdates[0];
+                msgId = pollUpdate?.pollUpdateMessageKey?.id || baileysVoteEvent.key?.id;
+                voter = pollUpdate?.vote?.voterJid;
+                selectedOptions = pollUpdate?.vote?.selectedOptions || [];
+                log(`Pattern 2: Nested update - msgId=${msgId}`);
+            }
+            // Pattern 3: From messages.update with key and update
+            else if (baileysVoteEvent.key && baileysVoteEvent.update) {
+                msgId = baileysVoteEvent.key.id;
+                voter = baileysVoteEvent.update.pollUpdates?.[0]?.vote?.voterJid;
+                selectedOptions = baileysVoteEvent.update.pollUpdates?.[0]?.vote?.selectedOptions || [];
+                log(`Pattern 3: messages.update - msgId=${msgId}`);
+            }
+            // Pattern 4: Already processed aggregated votes (from getAggregateVotesInPollMessage)
+            else if (Array.isArray(baileysVoteEvent)) {
+                warn("Received aggregated votes array - use handleBaileysVote instead");
+                return;
+            }
+
+            log(`Extracted: msgId=${msgId}, voter=${voter}, options=${JSON.stringify(selectedOptions)}`);
+
+            if (!msgId || !this.activePolls.has(msgId)) {
+                log(`❌ No active poll found for message ID: ${msgId}`);
+                return;
+            }
+
+            const { correctIndex, chatId, questionIndex, originalOptions } = this.activePolls.get(msgId);
+            if (!this.quizSessions.has(chatId)) return;
+
+            const session = this.quizSessions.get(chatId);
+            if (questionIndex !== session.index) {
+                log(`Question index mismatch: expected ${session.index}, got ${questionIndex}`);
+                return;
+            }
+
+            const uniqueVoteKey = `${session.index}_${voter}`;
+            if (session.creditedVotes.has(uniqueVoteKey)) {
+                log(`Already credited vote for ${voter} on Q${session.index + 1}`);
+                return;
+            }
+
+            session.creditedVotes.add(uniqueVoteKey);
+            if (!session.scores.has(voter)) session.scores.set(voter, 0);
+
+            // Options Check
+            const options = originalOptions || session.questions[session.index].options;
+            const normalize = (str) => (str ? String(str).trim().toLowerCase() : "");
+            const correctText = normalize(options[correctIndex]);
+
+            const isCorrect = (selectedOptions || []).some(opt => {
+                const voteText = normalize(opt.optionName || opt.name || opt);
+                log(`Comparing vote: "${voteText}" with correct: "${correctText}"`);
+                return voteText === correctText ||
+                    (voteText.length > 2 && correctText.includes(voteText)) ||
+                    (correctText.length > 2 && voteText.includes(correctText));
+            });
+
+            log(`🗳️ Vote Result: ${voter?.split('@')[0]} | Correct: ${isCorrect}`);
+            if (isCorrect) {
+                session.scores.set(voter, session.scores.get(voter) + 1);
+                log(`✅ ${voter?.split('@')[0]} got it right! New score: ${session.scores.get(voter)}`);
+            }
+
+        } catch (e) {
+            error("🚨 Fatal Vote Error: " + (e.stack || e.message));
+        }
+    }
+
     // Baileys vote handler - processes aggregated votes from getAggregateVotesInPollMessage
     // @param pollMsgId - The message ID of the poll
     // @param aggregatedVotes - Array of { name: optionText, voters: [jid, ...] } from Baileys
