@@ -1,4 +1,4 @@
-import makeWASocket, { useMultiFileAuthState, fetchLatestBaileysVersion, getAggregateVotesInPollMessage, DisconnectReason, downloadMediaMessage, delay } from '@whiskeysockets/baileys';
+import { makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, getAggregateVotesInPollMessage, DisconnectReason, downloadMediaMessage, delay } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import express from 'express';
 import qrcodeTerminal from 'qrcode-terminal';
@@ -228,6 +228,9 @@ async function runNextQuestion(chatId) {
     const q = session.questions[session.currentIndex];
     session.questionScores[session.currentIndex] = new Map();
 
+    // Handle both formats: correct (web UI) and correct_index (QuizEngine)
+    const correctIndex = q.correct !== undefined ? q.correct : q.correct_index;
+
     // Send Poll
     const sentMsg = await sock.sendMessage(chatId, {
         poll: {
@@ -246,16 +249,18 @@ async function runNextQuestion(chatId) {
             chatId,
             questionIndex: session.currentIndex,
             options: q.options,
-            correctIndex: q.correct
+            correctIndex: correctIndex
         });
     }
 
     // Wait for Timer
     setTimeout(async () => {
-        // Calculate/Show Answer
-        const correctOpt = q.options[q.correct] || "Unknown";
+        // Calculate/Show Answer - handle both formats
+        const correctIdx = q.correct !== undefined ? q.correct : q.correct_index;
+        const explanation = q.explanation || q.answer_explanation || '';
+        const correctOpt = q.options[correctIdx] || "Unknown";
         await sock.sendMessage(chatId, {
-            text: `⏰ Time's up!\n\n✅ Correct: *${correctOpt}*\n\n💡 ${q.explanation || ''}`
+            text: `⏰ Time's up!\n\n✅ Correct: *${correctOpt}*\n\n💡 ${explanation}`
         });
 
         if (sentMsg) activePolls.delete(sentMsg.key.id);

@@ -1,4 +1,4 @@
-// Note: Poll from whatsapp-web.js not used in Baileys version
+// Baileys-compatible Quiz Engine - Uses Baileys poll format
 import pdfParse from 'pdf-parse';
 import { promisify } from 'util';
 const sleep = promisify(setTimeout);
@@ -245,38 +245,42 @@ Format:
         });
     }
 
-    async handleVote(vote) {
+    // Baileys vote handler - processes aggregated votes from getAggregateVotesInPollMessage
+    // @param pollMsgId - The message ID of the poll
+    // @param aggregatedVotes - Array of { name: optionText, voters: [jid, ...] } from Baileys
+    async handleBaileysVote(pollMsgId, aggregatedVotes) {
         try {
-            const msgId = vote.parentMessage.id.id;
-            if (!this.activePolls.has(msgId)) return;
-            const { correctIndex, chatId, questionIndex, originalOptions } = this.activePolls.get(msgId); // Deep Memory
+            if (!this.activePolls.has(pollMsgId)) return;
+            const { correctIndex, chatId, questionIndex, originalOptions } = this.activePolls.get(pollMsgId);
             if (!this.quizSessions.has(chatId)) return;
             const session = this.quizSessions.get(chatId);
             if (questionIndex !== session.index) return;
 
-            const uniqueVoteKey = `${session.index}_${vote.voter}`;
-            if (session.creditedVotes.has(uniqueVoteKey)) return;
-            session.creditedVotes.add(uniqueVoteKey);
-            if (!session.scores.has(vote.voter)) session.scores.set(vote.voter, 0);
+            const options = originalOptions || session.questions[session.index].options;
+            const normalize = (str) => (str ? String(str).trim().toLowerCase() : "");
+            const correctText = normalize(options[correctIndex]);
 
-            try {
-                // Options Check
-                const options = originalOptions || session.questions[session.index].options;
-                const normalize = (str) => (str ? String(str).trim().toLowerCase() : "");
-                const correctText = normalize(options[correctIndex]);
+            // Find the correct option's voters from aggregated votes
+            const correctVoteEntry = aggregatedVotes.find(v => normalize(v.name) === correctText);
+            const correctVoters = correctVoteEntry ? correctVoteEntry.voters : [];
 
-                const isCorrect = vote.selectedOptions.some(opt => {
-                    const voteText = normalize(opt.name);
-                    return voteText === correctText || (voteText.length > 2 && correctText.includes(voteText)) || (correctText.length > 2 && voteText.includes(correctText));
-                });
+            // Credit each correct voter (only once per question)
+            for (const voterJid of correctVoters) {
+                const uniqueVoteKey = `${session.index}_${voterJid}`;
+                if (session.creditedVotes.has(uniqueVoteKey)) continue;
+                session.creditedVotes.add(uniqueVoteKey);
 
-                console.log(`🗳️ Vote: ${vote.voter} | Expect: ${correctText} | Correct: ${isCorrect}`);
-                if (isCorrect) session.scores.set(vote.voter, session.scores.get(vote.voter) + 1);
-            } catch (e) { console.error("Vote Logic Error:", e); }
-        } catch (e) { console.error("Fatal Vote Error:", e); }
+                if (!session.scores.has(voterJid)) session.scores.set(voterJid, 0);
+                session.scores.set(voterJid, session.scores.get(voterJid) + 1);
+                log(`🗳️ Vote credited: ${voterJid.split('@')[0]} for Q${questionIndex + 1}`);
+            }
+
+            log(`✅ Q${questionIndex + 1}: ${correctVoters.length} correct votes`);
+        } catch (e) { error("Fatal Vote Error: " + e.message); }
     }
 
-    async sendMockTestSummaryWithAnswers(chat, chatId) {
+    // Baileys-compatible: Uses sock.sendMessage instead of chat.sendMessage
+    async sendMockTestSummaryWithAnswers(sock, chatId) {
         const session = this.quizSessions.get(chatId);
         if (!session) return;
         let template = `📘 *DETAILED SOLUTIONS* 📘\n*Topic:* ${session.topic}\n──────────────────\n\n`;
@@ -285,11 +289,12 @@ Format:
         });
         if (template.length > 2000) {
             const chunks = template.match(/.{1,2000}/g);
-            for (const chunk of chunks) await chat.sendMessage(chunk);
-        } else await chat.sendMessage(template);
+            for (const chunk of chunks) await sock.sendMessage(chatId, { text: chunk });
+        } else await sock.sendMessage(chatId, { text: template });
     }
 
-    async runQuizStep(chat, chatId) {
+    // Baileys-compatible: Uses sock.sendMessage with Baileys poll format
+    async runQuizStep(sock, chatId) {
         const session = this.quizSessions.get(chatId);
         if (!session || !session.active) return;
 
@@ -301,8 +306,9 @@ Format:
                 report += `${i === 0 ? '🥇' : i === 1 ? '🥈' : '🥉'} @${id.split('@')[0]} : ${sc}/${session.questions.length}\n`;
             });
             report += `──────────────────`;
-            await chat.sendMessage(report, { mentions: sorted.map(s => s[0]) });
-            await this.sendMockTestSummaryWithAnswers(chat, chatId);
+            // Baileys format: sock.sendMessage(jid, { text, mentions })
+            await sock.sendMessage(chatId, { text: report, mentions: sorted.map(s => s[0]) });
+            await this.sendMockTestSummaryWithAnswers(sock, chatId);
 
             // Cleanup
             if (session.timeoutIds) session.timeoutIds.forEach(id => clearTimeout(id));
@@ -312,21 +318,37 @@ Format:
 
         const questionStartTime = Date.now();
         const q = session.questions[session.index];
-        const poll = new Poll(`Q${session.index + 1}: ${q.question}`, q.options, { allowMultipleAnswers: false });
-        // NOTE: chat.sendMessage might fail if chat is not valid, but we assume it's passed correctly
-        const sentMsg = await chat.sendMessage(poll);
-        this.activePolls.set(sentMsg.id.id, { correctIndex: q.correct_index, chatId, questionIndex: session.index, originalOptions: q.options });
+
+        // Baileys poll format: { poll: { name, values, selectableCount } }
+        const sentMsg = await sock.sendMessage(chatId, {
+            poll: {
+                name: `Q${session.index + 1}: ${q.question}`,
+                values: q.options,
+                selectableCount: 1
+            }
+        });
+
+        // Store poll info for vote tracking (use Baileys message key format)
+        if (sentMsg && sentMsg.key && sentMsg.key.id) {
+            this.activePolls.set(sentMsg.key.id, {
+                correctIndex: q.correct_index,
+                chatId,
+                questionIndex: session.index,
+                originalOptions: q.options
+            });
+            log(`📊 Poll sent: Q${session.index + 1}, msgId: ${sentMsg.key.id}`);
+        }
 
         const messageSendTime = Date.now() - questionStartTime;
         const preciseDelay = Math.max(100, (session.timer * 1000) - messageSendTime);
 
         const timeoutId = setTimeout(() => {
             if (!this.quizSessions.has(chatId)) return;
-            this.activePolls.delete(sentMsg.id.id);
+            if (sentMsg && sentMsg.key) this.activePolls.delete(sentMsg.key.id);
             session.index++;
 
             // Recursive call for next step
-            this.runQuizStep(chat, chatId).catch(err => console.error("Error in runQuizStep:", err));
+            this.runQuizStep(sock, chatId).catch(err => error("Error in runQuizStep: " + err.message));
         }, preciseDelay);
 
         if (!session.timeoutIds) session.timeoutIds = [];
@@ -335,10 +357,18 @@ Format:
 
     // --- INTERFACE ---
 
-    startQuiz(chat, chatId, questions, topic = "General", timer = 30) {
+    // Baileys-compatible: Accepts sock (Baileys socket) instead of chat object
+    // @param sock - Baileys socket instance from makeWASocket
+    // @param chatId - JID of the chat (group or individual)
+    // @param questions - Array of { question, options, correct_index, answer_explanation }
+    // @param topic - Quiz topic name
+    // @param timer - Seconds per question
+    startQuiz(sock, chatId, questions, topic = "General", timer = 30) {
         if (this.quizSessions.has(chatId)) {
             return false; // Already active
         }
+
+        log(`Starting quiz: "${topic}" with ${questions.length} questions in ${chatId}`);
 
         this.quizSessions.set(chatId, {
             questions,
@@ -351,7 +381,7 @@ Format:
             timeoutIds: []
         });
 
-        this.runQuizStep(chat, chatId);
+        this.runQuizStep(sock, chatId);
         return true;
     }
 
