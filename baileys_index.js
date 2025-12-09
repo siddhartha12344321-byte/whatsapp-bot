@@ -68,6 +68,40 @@ const store = simpleStore;
 const quizSessions = new Map(); // chatId -> Session Object
 const activePolls = new Map(); // pollMsgId -> { chatId, questionIndex, options, correctIndex }
 const chatHistory = new Map();
+const polls = {}; // store pollId → poll data & votes (MANUAL TRACKING)
+
+// ---------- Manual Vote Helpers ----------
+function getPollResults(pollId) {
+    const poll = polls[pollId];
+    if (!poll) return null;
+
+    const counts = Array(poll.options.length).fill(0);
+
+    for (const voter in poll.votes) {
+        counts[poll.votes[voter]]++;
+    }
+
+    return {
+        question: poll.question,
+        options: poll.options,
+        counts
+    };
+}
+
+// Shows "QUIZ RESULT" with Green/White squares
+async function sendPollResult(jid, pollId, correctIndex) {
+    const result = getPollResults(pollId);
+    if (!result) return;
+
+    let text = `*QUIZ RESULT*\n\n`;
+    text += `*Q:* ${result.question}\n\n`;
+
+    result.options.forEach((opt, i) => {
+        text += `${i === correctIndex ? "🟩" : "⬜"} ${opt} — *${result.counts[i]} votes*\n`;
+    });
+
+    await sock.sendMessage(jid, { text });
+}
 
 // ---------- AI Clients ----------
 const quizEngine = new QuizEngine(GROQ_API_KEY);
@@ -249,30 +283,32 @@ async function runNextQuestion(chatId) {
         }
     });
 
-    if (sentMsg) {
-        // Fix: Store outgoing poll message for voting logic
-        if (!simpleStore.messages[chatId]) simpleStore.messages[chatId] = {};
-        simpleStore.messages[chatId][sentMsg.key.id] = sentMsg;
-
-        activePolls.set(sentMsg.key.id, {
-            chatId,
-            questionIndex: session.currentIndex,
-            options: q.options,
-            correctIndex: correctIndex
-        });
-    }
-
     // Wait for Timer
     setTimeout(async () => {
-        // Calculate/Show Answer - handle both formats
-        const correctIdx = q.correct !== undefined ? q.correct : q.correct_index;
-        const explanation = q.explanation || q.answer_explanation || '';
-        const correctOpt = q.options[correctIdx] || "Unknown";
-        await sock.sendMessage(chatId, {
-            text: `⏰ Time's up!\n\n✅ Correct: *${correctOpt}*\n\n💡 ${explanation}`
-        });
+        if (!sentMsg) return;
+        const pollId = sentMsg.key.id;
 
-        if (sentMsg) activePolls.delete(sentMsg.key.id);
+        // --- Calculate Scores Manually ---
+        const pollData = polls[pollId];
+        if (pollData) {
+            const qScoreMap = session.questionScores[session.currentIndex];
+
+            // Iterate all votes
+            for (const voter in pollData.votes) {
+                const votedIndex = pollData.votes[voter];
+                if (votedIndex === correctIndex) {
+                    qScoreMap.set(voter, 1); // Correct answer = 1 point
+                }
+            }
+        } else {
+            console.warn(`⚠️ Poll data not found for ID: ${pollId}`);
+        }
+
+        // --- Show Result (User requested format) ---
+        await sendPollResult(chatId, pollId, correctIndex);
+
+        // Cleanup manual poll data to save memory
+        if (polls[pollId]) delete polls[pollId];
 
         session.currentIndex++;
         await delay(2000);
@@ -413,9 +449,46 @@ async function analyzeImage(buffer, mime) {
     return "❌ Image analysis failed - no vision API available. Please check API keys.";
 }
 
+// Check API Keys at Startup
+if (!GEMINI_API_KEY && !GROQ_API_KEY && !DEEPSEEK_API_KEY) {
+    console.warn("⚠️ NO AI API KEYS FOUND! Image and PDF analysis will NOT work. Please set GEMINI_API_KEY, GROQ_API_KEY, or DEEPSEEK_API_KEY.");
+} else {
+    if (GEMINI_API_KEY) console.log("✅ Gemini API Key found");
+    if (GROQ_API_KEY) console.log("✅ Groq API Key found");
+    if (DEEPSEEK_API_KEY) console.log("✅ DeepSeek API Key found");
+}
+
 // ---------- PDF Analysis with Multi-Provider Fallback ----------
 async function analyzePdf(buffer, userQuestion = null) {
-    // Extract text from PDF first
+    const base64 = buffer.toString('base64');
+
+    // 1. Try Gemini Native PDF Support (Best for Scanned PDFs/images)
+    if (genAI) {
+        try {
+            console.log("📄 Trying Gemini Native PDF Analysis...");
+            const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+
+            const prompt = userQuestion
+                ? `Answer this question based on the document: "${userQuestion}"`
+                : "Analyze this document. partial summary, key points, and important facts.";
+
+            const result = await model.generateContent([
+                { text: prompt },
+                { inlineData: { data: base64, mimeType: "application/pdf" } }
+            ]);
+
+            const text = result.response.text();
+            if (text && text.length > 20) {
+                console.log("✅ Gemini PDF success");
+                return text;
+            }
+        } catch (e) {
+            console.warn("⚠️ Gemini PDF failed:", e.message);
+        }
+    }
+
+    // 2. Fallback: Extract Text (for Groq/DeepSeek)
+    // Only useful if PDF works with pdf-parse (not scanned)
     let pdfText = '';
     try {
         const pdfParse = (await import('pdf-parse')).default;
@@ -424,52 +497,21 @@ async function analyzePdf(buffer, userQuestion = null) {
         console.log(`📄 Extracted ${pdfText.length} characters from PDF`);
     } catch (e) {
         console.error("PDF extraction error:", e.message);
-        return "❌ Could not read PDF content.";
     }
 
     if (pdfText.length < 50) {
-        return "❌ PDF appears to be empty or contains only images (cannot extract text).";
+        if (!genAI) return "❌ PDF appears to be scanned/image-only. Gemini API Key required to analyze scanned PDFs.";
+        return "❌ PDF appears to be empty or contains only images.";
     }
 
-    // Truncate if too large (keep under 30k chars for API limits)
+    // Truncate if too large
     if (pdfText.length > 30000) {
         pdfText = pdfText.substring(0, 30000) + "\n...[truncated]";
     }
 
-    // Build the prompt based on user's request
-    let prompt;
-    if (userQuestion) {
-        prompt = `Based on the following document content, please answer this question: "${userQuestion}"
-
-DOCUMENT CONTENT:
-${pdfText}
-
-Provide a clear, detailed answer based on the document.`;
-    } else {
-        prompt = `Please analyze and summarize the following document. Provide:
-1. A brief summary (2-3 sentences)
-2. Key points/topics covered
-3. Important facts or figures mentioned
-
-DOCUMENT CONTENT:
-${pdfText}`;
-    }
-
-    // Try Gemini first
-    if (genAI) {
-        try {
-            console.log("📄 Trying Gemini for PDF analysis...");
-            const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-            const result = await model.generateContent(prompt);
-            const text = result.response.text();
-            if (text && text.length > 20) {
-                console.log("✅ Gemini PDF analysis success");
-                return text;
-            }
-        } catch (e) {
-            console.warn("⚠️ Gemini PDF failed:", e.message);
-        }
-    }
+    const promptText = userQuestion
+        ? `Based on context, answer: "${userQuestion}"\n\nCONTEXT:\n${pdfText}`
+        : `Summarize this:\n\n${pdfText}`;
 
     // Try Groq as fallback
     if (GROQ_API_KEY) {
@@ -483,9 +525,8 @@ ${pdfText}`;
                 },
                 body: JSON.stringify({
                     model: 'llama-3.3-70b-versatile',
-                    messages: [{ role: 'user', content: prompt }],
-                    max_tokens: 2048,
-                    temperature: 0.7
+                    messages: [{ role: 'user', content: promptText }],
+                    max_tokens: 2048
                 })
             });
             const data = await resp.json();
@@ -493,13 +534,12 @@ ${pdfText}`;
                 console.log("✅ Groq PDF analysis success");
                 return data.choices[0].message.content;
             }
-            console.warn("⚠️ Groq response:", data.error?.message || "No content");
         } catch (e) {
             console.warn("⚠️ Groq PDF failed:", e.message);
         }
     }
 
-    return "❌ PDF analysis failed - AI service unavailable.";
+    return "❌ PDF analysis failed. Please ensure GEMINI_API_KEY is set for best results.";
 }
 
 // ---------- Main Message Handler ----------
@@ -709,49 +749,56 @@ async function startSock() {
     });
 
     sock.ev.on('messages.upsert', async ({ messages }) => {
-        for (const m of messages) {
-            if (!m.key.fromMe && m.key.remoteJid) {
-                await handleMessage(m, m.key.remoteJid);
-            }
+        const msg = messages[0];
+        if (!msg || !msg.message) return;
+
+        // --- 1. Manual Poll Tracking Logic (User provided) ---
+
+        // When a poll is created (Outgoing or Incoming)
+        if (msg.message.pollCreationMessage || msg.message.pollCreationMessageV3) {
+            const pollMsg = msg.message.pollCreationMessage || msg.message.pollCreationMessageV3;
+            const pollId = msg.key.id;
+
+            polls[pollId] = {
+                question: pollMsg.name,
+                options: pollMsg.options.map(o => o.optionName),
+                // optionHashes usually match optionName in simple polls, or strict sha256 in V3. 
+                // We map both to ensure we catch votes.
+                optionHashes: pollMsg.options.map(o => o.optionName),
+                votes: {}
+            };
+
+            console.log("� POLL CREATED (Manual Track):", pollId);
         }
-    });
 
-    sock.ev.on('messages.update', async (updates) => {
-        for (const update of updates) {
-            if (update.update.pollUpdates) {
-                const pollId = update.key.id;
-                const pollData = activePolls.get(pollId);
+        // When a user votes
+        if (msg.message.pollUpdateMessage) {
+            const pollUpdate = msg.message.pollUpdateMessage;
+            const pollId = pollUpdate.pollCreationMessageKey?.id; // Baileys standard location
 
-                if (pollData) {
-                    const originalMsg = store.loadMessage(pollData.chatId, pollId);
-                    if (originalMsg) {
-                        const votes = await getAggregateVotesInPollMessage({
-                            message: originalMsg,
-                            pollUpdates: update.update.pollUpdates
-                        });
-                        console.log(`🗳️ Votes calculated for Q${pollData.questionIndex + 1}:`, votes);
+            if (polls[pollId]) {
+                const vote = pollUpdate.vote;
+                const voter = msg.key.participant || msg.key.remoteJid;
 
-                        const correctOptionText = pollData.options[pollData.correctIndex];
-                        const correctVoteEntry = votes.find(v => v.name === correctOptionText);
-                        const currentCorrectVoters = new Set(correctVoteEntry ? correctVoteEntry.voters : []);
+                if (vote && vote.selectedOption) {
+                    const selectedOption = vote.selectedOption;
+                    const optionIndex = polls[pollId].options.indexOf(selectedOption);
 
-                        console.log(`✅ Correct Answer: ${correctOptionText}, Voters: ${currentCorrectVoters.size}`);
-
-                        const session = quizSessions.get(pollData.chatId);
-                        if (session && session.active && session.questionScores[pollData.questionIndex]) {
-                            const qScoreMap = session.questionScores[pollData.questionIndex];
-                            qScoreMap.clear();
-                            currentCorrectVoters.forEach(voterJid => {
-                                qScoreMap.set(voterJid, 1);
-                            });
-                        }
-                    } else {
-                        console.warn(`⚠️ Poll original message not found in store for ID: ${pollId}`);
+                    if (optionIndex !== -1) {
+                        polls[pollId].votes[voter] = optionIndex;
+                        console.log(`🗳️ VOTE RECEIVED → ${voter.split('@')[0]} voted for "${selectedOption}"`);
                     }
                 }
             }
         }
+
+        // --- 2. Normal Message Handling ---
+        if (!msg.key.fromMe && msg.key.remoteJid) {
+            await handleMessage(msg, msg.key.remoteJid);
+        }
     });
+
+    // Removed: sock.ev.on('messages.update') - No longer needed
 }
 
 app.listen(PORT, () => console.log(`🚀 Server on ${PORT}`));
