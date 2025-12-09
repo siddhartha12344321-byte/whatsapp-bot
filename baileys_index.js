@@ -327,26 +327,179 @@ function normalizeMessages(messages) {
 }
 
 async function analyzeImage(buffer, mime) {
-    if (!DEEPSEEK_API_KEY) throw new Error("DeepSeek Config Missing");
     const base64 = buffer.toString('base64');
-    const resp = await fetch('https://api.deepseek.com/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${DEEPSEEK_API_KEY}` },
-        body: JSON.stringify({
-            model: 'deepseek-vl2',
-            messages: [
-                {
-                    role: 'user', content: [
-                        { type: 'text', text: 'Analyze this. If exam question, solve it. If not, describe it.' },
-                        { type: 'image_url', image_url: { url: `data:${mime};base64,${base64}` } }
-                    ]
-                }
-            ]
-        })
-    });
-    const data = await resp.json();
-    if (!resp.ok || data.error) return `Error: ${JSON.stringify(data.error || data)}`;
-    return data.choices?.[0]?.message?.content || "Analysis failed";
+
+    // Try Gemini Vision first (most reliable)
+    if (genAI) {
+        try {
+            console.log("📸 Trying Gemini Vision...");
+            const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+            const result = await model.generateContent([
+                { text: "Analyze this image. If it's an exam question, solve it step by step. If not, describe what you see in detail." },
+                { inlineData: { data: base64, mimeType: mime } }
+            ]);
+            const text = result.response.text();
+            if (text && text.length > 10) {
+                console.log("✅ Gemini Vision success");
+                return text;
+            }
+        } catch (e) {
+            console.warn("⚠️ Gemini Vision failed:", e.message);
+        }
+    }
+
+    // Try Groq Llama Vision as fallback
+    if (GROQ_API_KEY) {
+        try {
+            console.log("📸 Trying Groq Llama Vision...");
+            const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${GROQ_API_KEY}`
+                },
+                body: JSON.stringify({
+                    model: 'llama-3.2-11b-vision-preview',
+                    messages: [{
+                        role: 'user',
+                        content: [
+                            { type: 'text', text: 'Analyze this image. If exam question, solve it. Otherwise describe it.' },
+                            { type: 'image_url', image_url: { url: `data:${mime};base64,${base64}` } }
+                        ]
+                    }],
+                    max_tokens: 1024
+                })
+            });
+            const data = await resp.json();
+            if (resp.ok && data.choices?.[0]?.message?.content) {
+                console.log("✅ Groq Vision success");
+                return data.choices[0].message.content;
+            }
+            console.warn("⚠️ Groq Vision response:", data.error?.message || "No content");
+        } catch (e) {
+            console.warn("⚠️ Groq Vision failed:", e.message);
+        }
+    }
+
+    // Try DeepSeek as last resort
+    if (DEEPSEEK_API_KEY) {
+        try {
+            console.log("📸 Trying DeepSeek Vision...");
+            const resp = await fetch('https://api.deepseek.com/chat/completions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${DEEPSEEK_API_KEY}` },
+                body: JSON.stringify({
+                    model: 'deepseek-chat',
+                    messages: [{
+                        role: 'user',
+                        content: [
+                            { type: 'text', text: 'Analyze this image. If exam question, solve it. If not, describe it.' },
+                            { type: 'image_url', image_url: { url: `data:${mime};base64,${base64}` } }
+                        ]
+                    }]
+                })
+            });
+            const data = await resp.json();
+            if (resp.ok && data.choices?.[0]?.message?.content) {
+                console.log("✅ DeepSeek Vision success");
+                return data.choices[0].message.content;
+            }
+            console.warn("⚠️ DeepSeek response:", data.error?.message || JSON.stringify(data));
+        } catch (e) {
+            console.warn("⚠️ DeepSeek Vision failed:", e.message);
+        }
+    }
+
+    return "❌ Image analysis failed - no vision API available. Please check API keys.";
+}
+
+// ---------- PDF Analysis with Multi-Provider Fallback ----------
+async function analyzePdf(buffer, userQuestion = null) {
+    // Extract text from PDF first
+    let pdfText = '';
+    try {
+        const pdfParse = (await import('pdf-parse')).default;
+        const data = await pdfParse(buffer);
+        pdfText = data.text || '';
+        console.log(`📄 Extracted ${pdfText.length} characters from PDF`);
+    } catch (e) {
+        console.error("PDF extraction error:", e.message);
+        return "❌ Could not read PDF content.";
+    }
+
+    if (pdfText.length < 50) {
+        return "❌ PDF appears to be empty or contains only images (cannot extract text).";
+    }
+
+    // Truncate if too large (keep under 30k chars for API limits)
+    if (pdfText.length > 30000) {
+        pdfText = pdfText.substring(0, 30000) + "\n...[truncated]";
+    }
+
+    // Build the prompt based on user's request
+    let prompt;
+    if (userQuestion) {
+        prompt = `Based on the following document content, please answer this question: "${userQuestion}"
+
+DOCUMENT CONTENT:
+${pdfText}
+
+Provide a clear, detailed answer based on the document.`;
+    } else {
+        prompt = `Please analyze and summarize the following document. Provide:
+1. A brief summary (2-3 sentences)
+2. Key points/topics covered
+3. Important facts or figures mentioned
+
+DOCUMENT CONTENT:
+${pdfText}`;
+    }
+
+    // Try Gemini first
+    if (genAI) {
+        try {
+            console.log("📄 Trying Gemini for PDF analysis...");
+            const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+            const result = await model.generateContent(prompt);
+            const text = result.response.text();
+            if (text && text.length > 20) {
+                console.log("✅ Gemini PDF analysis success");
+                return text;
+            }
+        } catch (e) {
+            console.warn("⚠️ Gemini PDF failed:", e.message);
+        }
+    }
+
+    // Try Groq as fallback
+    if (GROQ_API_KEY) {
+        try {
+            console.log("📄 Trying Groq for PDF analysis...");
+            const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${GROQ_API_KEY}`
+                },
+                body: JSON.stringify({
+                    model: 'llama-3.3-70b-versatile',
+                    messages: [{ role: 'user', content: prompt }],
+                    max_tokens: 2048,
+                    temperature: 0.7
+                })
+            });
+            const data = await resp.json();
+            if (resp.ok && data.choices?.[0]?.message?.content) {
+                console.log("✅ Groq PDF analysis success");
+                return data.choices[0].message.content;
+            }
+            console.warn("⚠️ Groq response:", data.error?.message || "No content");
+        } catch (e) {
+            console.warn("⚠️ Groq PDF failed:", e.message);
+        }
+    }
+
+    return "❌ PDF analysis failed - AI service unavailable.";
 }
 
 // ---------- Main Message Handler ----------
@@ -363,21 +516,41 @@ async function handleMessage(msg, remoteJid) {
         text = text.trim();
 
         if (msgContent.documentMessage && msgContent.documentMessage.mimetype === 'application/pdf') {
-            await sock.sendMessage(remoteJid, { text: "📄 Reading PDF..." });
-            try {
-                const buffer = await downloadMediaMessage(msg, 'buffer', {});
-                let topic = 'General';
-                const match = text.match(/(?:topic|on)\s+([a-zA-Z0-9 ]+)/i);
-                if (match) topic = match[1];
+            const buffer = await downloadMediaMessage(msg, 'buffer', {});
+            const caption = text.toLowerCase();
 
-                const questions = await quizEngine.generateQuizFromPdfBuffer({ pdfBuffer: buffer, topic, qty: 10 });
-                if (questions.length > 0) {
-                    await startQuizSession(remoteJid, { title: `PDF Quiz: ${topic}`, questions, timer: 30 });
+            // Check what user wants to do with PDF
+            const wantsQuiz = caption.includes('quiz') || caption.includes('test') || caption.includes('mcq');
+            const hasQuestion = caption.includes('?') || caption.startsWith('what') || caption.startsWith('how') ||
+                caption.startsWith('why') || caption.startsWith('explain') || caption.startsWith('tell');
+
+            try {
+                if (wantsQuiz) {
+                    // Mode 1: Generate Quiz from PDF
+                    await sock.sendMessage(remoteJid, { text: "📝 Generating quiz from PDF..." });
+                    let topic = 'General';
+                    const match = text.match(/(?:topic|on|about)\\s+([a-zA-Z0-9 ]+)/i);
+                    if (match) topic = match[1];
+
+                    const questions = await quizEngine.generateQuizFromPdfBuffer({ pdfBuffer: buffer, topic, qty: 10 });
+                    if (questions.length > 0) {
+                        await startQuizSession(remoteJid, { title: `PDF Quiz: ${topic}`, questions, timer: 30 });
+                    } else {
+                        await sock.sendMessage(remoteJid, { text: "❌ Could not generate quiz from this PDF." });
+                    }
+                } else if (hasQuestion) {
+                    // Mode 2: Answer question from PDF content
+                    await sock.sendMessage(remoteJid, { text: "🔍 Searching PDF for answer..." });
+                    const answer = await analyzePdf(buffer, text);
+                    await sock.sendMessage(remoteJid, { text: `📄 *Answer from PDF:*\n\n${answer}` });
                 } else {
-                    await sock.sendMessage(remoteJid, { text: "❌ No questions found in PDF." });
+                    // Mode 3: Summarize PDF
+                    await sock.sendMessage(remoteJid, { text: "📄 Analyzing PDF..." });
+                    const summary = await analyzePdf(buffer, null);
+                    await sock.sendMessage(remoteJid, { text: `📄 *PDF Summary:*\n\n${summary}` });
                 }
             } catch (e) {
-                console.error(e);
+                console.error("PDF Error:", e);
                 await sock.sendMessage(remoteJid, { text: "⚠️ PDF Error: " + e.message });
             }
             return;
